@@ -64,12 +64,12 @@ BasinOps /basins
   delete_basin # (basin)
 
 AccessTokenOps /access-tokens # not initially supported
-  list_access_tokens
-  issue_access_token
-  revoke_access_token
+  list_access_tokens # (id)
+  issue_access_token # (id)
+  revoke_access_token # (id)
 
 MetricOps /metrics # not initially supported
-  get_account_metrics
-  get_basin_metrics
-  get_stream_metrics
+  get_account_metrics # ()
+  get_basin_metrics # (basin)
+  get_stream_metrics # (basin, stream)
 ```
