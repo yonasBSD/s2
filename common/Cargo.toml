@@ -1,0 +1,29 @@
+[package]
+name = "s2-common"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+rkyv = ["dep:rkyv", "compact_str/rkyv"]
+utoipa = ["dep:utoipa"]
+clap = ["dep:clap"]
+
+[dependencies]
+bytes = { workspace = true }
+clap = { workspace = true, optional = true }
+compact_str = { workspace = true, features = ["serde"] }
+const_format = { workspace = true }
+enum-ordinalize = { workspace = true }
+enumset = { workspace = true }
+futures = { workspace = true }
+rkyv = { workspace = true, optional = true }
+serde = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }

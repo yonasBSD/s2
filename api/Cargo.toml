@@ -1,0 +1,35 @@
+[package]
+name = "s2-api"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+axum = ["dep:axum"]
+utoipa = ["dep:utoipa"]
+codegen = ["dep:prost-build"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+base64ct = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
+enum-ordinalize = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+itertools = { workspace = true }
+prost = { workspace = true }
+s2-common = { path = "../common" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio-util = { workspace = true, features = ["rt", "codec"] }
+utoipa = { workspace = true, optional = true }
+zstd = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
