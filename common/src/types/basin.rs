@@ -23,8 +23,8 @@ where
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::Object::builder()
             .schema_type(utoipa::openapi::Type::String)
-            .min_length((!T::IS_PREFIX).then_some(Self::MIN_LENGTH))
-            .max_length(Some(Self::MAX_LENGTH))
+            .min_length((!T::IS_PREFIX).then_some(caps::MIN_BASIN_NAME_LEN))
+            .max_length(Some(caps::MAX_BASIN_NAME_LEN))
             .into()
     }
 }
@@ -51,11 +51,6 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
     }
 }
 
-impl<T: StrProps> BasinNameStr<T> {
-    const MIN_LENGTH: usize = 8;
-    const MAX_LENGTH: usize = caps::MAX_BASIN_NAME_LEN;
-}
-
 impl<T: StrProps> AsRef<str> for BasinNameStr<T> {
     fn as_ref(&self) -> &str {
         &self.0
@@ -74,20 +69,20 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     type Error = ValidationError;
 
     fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        if name.len() > Self::MAX_LENGTH {
+        if name.len() > caps::MAX_BASIN_NAME_LEN {
             return Err(format!(
                 "Basin {} must not exceed {} characters in length",
                 T::FIELD_NAME,
-                Self::MAX_LENGTH
+                caps::MAX_BASIN_NAME_LEN
             )
             .into());
         }
 
-        if !T::IS_PREFIX && name.len() < Self::MIN_LENGTH {
+        if !T::IS_PREFIX && name.len() < caps::MIN_BASIN_NAME_LEN {
             return Err(format!(
                 "Basin {} should be at least {} characters in length",
                 T::FIELD_NAME,
-                Self::MIN_LENGTH
+                caps::MIN_BASIN_NAME_LEN
             )
             .into());
         }
@@ -195,16 +190,15 @@ pub enum BasinState {
     Deleting,
 }
 
-#[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, strum::Display, Clone, Copy, PartialEq, Eq)]
 pub enum BasinScope {
     #[strum(serialize = "aws:us-east-1")]
-    #[default]
     AwsUsEast1,
 }
 
 #[derive(Debug, Clone)]
 pub struct BasinInfo {
     pub name: BasinName,
-    pub scope: BasinScope,
+    pub scope: Option<BasinScope>,
     pub state: BasinState,
 }
