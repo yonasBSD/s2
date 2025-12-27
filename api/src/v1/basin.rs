@@ -122,7 +122,6 @@ pub struct CreateOrReconfigureBasinRequest {
     pub config: Option<BasinConfig>,
     /// Basin scope.
     /// This cannot be reconfigured.
-    #[cfg_attr(feature = "utoipa", schema(value_type = BasinScope, default = "aws:us-east-1", required = false))]
     pub scope: Option<BasinScope>,
 }
 
@@ -137,6 +136,5 @@ pub struct CreateBasinRequest {
     /// Basin configuration.
     pub config: Option<BasinConfig>,
     /// Basin scope.
-    #[cfg_attr(feature = "utoipa", schema(value_type = BasinScope, default = "aws:us-east-1", required = false))]
     pub scope: Option<BasinScope>,
 }
