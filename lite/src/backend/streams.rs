@@ -13,12 +13,12 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
     error::{
-        BasinDeletionInProgressError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
+        BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, DeleteStreamError,
         GetStreamConfigError, ListStreamsError, ReconfigureStreamError, StreamAlreadyExistsError,
-        StreamDeletionInProgressError, StreamNotFoundError, StreamerError,
+        StreamDeletionPendingError, StreamNotFoundError, StreamerError,
     },
     kv,
 };
@@ -36,6 +36,9 @@ impl Backend {
         } = request.into();
 
         let key_range = kv::stream_meta::ser_key_range(&basin, &prefix, &start_after);
+        if key_range.is_empty() {
+            return Ok(Page::new_empty());
+        }
 
         const SCAN_OPTS: ScanOptions = ScanOptions {
             durability_filter: DurabilityLevel::Remote,
@@ -73,7 +76,7 @@ impl Backend {
         stream: StreamName,
         mut config: OptionalStreamConfig,
         mode: CreateMode,
-    ) -> Result<StreamInfo, CreateStreamError> {
+    ) -> Result<CreatedOrReconfigured<StreamInfo>, CreateStreamError> {
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         let Some(basin_meta) = db_txn_get(
@@ -87,7 +90,7 @@ impl Backend {
         };
 
         if basin_meta.deleted_at.is_some() {
-            return Err(BasinDeletionInProgressError { basin }.into());
+            return Err(BasinDeletionPendingError { basin }.into());
         }
 
         let stream_meta_key = kv::stream_meta::ser_key(&basin, &stream);
@@ -105,8 +108,8 @@ impl Backend {
             db_txn_get(&txn, &stream_meta_key, kv::stream_meta::deser_value).await?
         {
             if existing_meta.deleted_at.is_some() {
-                return Err(CreateStreamError::StreamDeletionInProgress(
-                    StreamDeletionInProgressError { basin, stream },
+                return Err(CreateStreamError::StreamDeletionPending(
+                    StreamDeletionPendingError { basin, stream },
                 ));
             }
             match mode {
@@ -114,11 +117,11 @@ impl Backend {
                     return if creation_idempotency_key.is_some()
                         && existing_meta.creation_idempotency_key == creation_idempotency_key
                     {
-                        Ok(StreamInfo {
+                        Ok(CreatedOrReconfigured::Created(StreamInfo {
                             name: stream,
                             created_at: existing_meta.created_at,
                             deleted_at: None,
-                        })
+                        }))
                     } else {
                         Err(StreamAlreadyExistsError { basin, stream }.into())
                     };
@@ -132,7 +135,7 @@ impl Backend {
         config = config.merge(basin_meta.config.default_stream_config).into();
 
         let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
-        let meta = kv::StreamMeta {
+        let meta = kv::stream_meta::StreamMeta {
             config: config.clone(),
             created_at,
             deleted_at: None,
@@ -152,10 +155,16 @@ impl Backend {
             client.reconfigure(config).await?;
         }
 
-        Ok(StreamInfo {
+        let info = StreamInfo {
             name: stream,
             created_at,
             deleted_at: None,
+        };
+
+        Ok(if existing_created_at.is_some() {
+            CreatedOrReconfigured::Reconfigured(info)
+        } else {
+            CreatedOrReconfigured::Created(info)
         })
     }
 
@@ -192,7 +201,7 @@ impl Backend {
             })?;
 
         if meta.deleted_at.is_some() {
-            return Err(StreamDeletionInProgressError { basin, stream }.into());
+            return Err(StreamDeletionPendingError { basin, stream }.into());
         }
 
         meta.config = meta.config.reconfigure(reconfig);
@@ -226,7 +235,7 @@ impl Backend {
             Err(StreamerError::StreamNotFound(e)) => {
                 return Err(DeleteStreamError::StreamNotFound(e));
             }
-            Err(StreamerError::StreamDeletionInProgress(e)) => {
+            Err(StreamerError::StreamDeletionPending(e)) => {
                 assert_eq!(e.basin, basin);
                 assert_eq!(e.stream, stream);
             }

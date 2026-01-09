@@ -13,12 +13,11 @@ use slatedb::{
 };
 use time::OffsetDateTime;
 
-use super::{Backend, store::db_txn_get};
+use super::{Backend, CreatedOrReconfigured, store::db_txn_get};
 use crate::backend::{
     error::{
-        BasinAlreadyExistsError, BasinDeletionInProgressError, BasinNotFoundError,
-        CreateBasinError, DeleteBasinError, GetBasinConfigError, ListBasinsError,
-        ReconfigureBasinError,
+        BasinAlreadyExistsError, BasinDeletionPendingError, BasinNotFoundError, CreateBasinError,
+        DeleteBasinError, GetBasinConfigError, ListBasinsError, ReconfigureBasinError,
     },
     kv,
 };
@@ -78,7 +77,7 @@ impl Backend {
         basin: BasinName,
         config: BasinConfig,
         mode: CreateMode,
-    ) -> Result<BasinInfo, CreateBasinError> {
+    ) -> Result<CreatedOrReconfigured<BasinInfo>, CreateBasinError> {
         let meta_key = kv::basin_meta::ser_key(&basin);
 
         let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -95,18 +94,18 @@ impl Backend {
             db_txn_get(&txn, &meta_key, kv::basin_meta::deser_value).await?
         {
             if existing_meta.deleted_at.is_some() {
-                return Err(BasinDeletionInProgressError { basin }.into());
+                return Err(BasinDeletionPendingError { basin }.into());
             }
             match mode {
                 CreateMode::CreateOnly(_) => {
                     return if creation_idempotency_key.is_some()
                         && existing_meta.creation_idempotency_key == creation_idempotency_key
                     {
-                        Ok(BasinInfo {
+                        Ok(CreatedOrReconfigured::Created(BasinInfo {
                             name: basin,
                             scope: None,
                             state: BasinState::Active,
-                        })
+                        }))
                     } else {
                         Err(BasinAlreadyExistsError { basin }.into())
                     };
@@ -119,7 +118,7 @@ impl Backend {
 
         let created_at = existing_created_at.unwrap_or_else(OffsetDateTime::now_utc);
 
-        let meta = kv::BasinMeta {
+        let meta = kv::basin_meta::BasinMeta {
             config,
             created_at,
             deleted_at: None,
@@ -133,10 +132,16 @@ impl Backend {
         };
         txn.commit_with_options(&WRITE_OPTS).await?;
 
-        Ok(BasinInfo {
+        let info = BasinInfo {
             name: basin,
             scope: None,
             state: BasinState::Active,
+        };
+
+        Ok(if existing_created_at.is_some() {
+            CreatedOrReconfigured::Reconfigured(info)
+        } else {
+            CreatedOrReconfigured::Created(info)
         })
     }
 
@@ -167,7 +172,7 @@ impl Backend {
         };
 
         if meta.deleted_at.is_some() {
-            return Err(BasinDeletionInProgressError { basin }.into());
+            return Err(BasinDeletionPendingError { basin }.into());
         }
 
         meta.config = meta.config.reconfigure(reconfig);
