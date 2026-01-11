@@ -3,6 +3,7 @@ resolver = "2"
 members = ["api", "common", "lite"]
 
 [workspace.package]
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/s2-streamstore/s2"
