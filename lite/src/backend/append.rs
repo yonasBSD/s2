@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     ops::{DerefMut as _, Range, RangeTo},
     sync::Arc,
+    time::Instant,
 };
 
 use futures::{FutureExt as _, Stream, StreamExt as _, stream::FuturesOrdered};
@@ -15,7 +16,10 @@ use s2_common::{
 use tokio::sync::oneshot;
 
 use super::Backend;
-use crate::backend::error::{AppendError, AppendErrorInternal, StorageError};
+use crate::{
+    backend::error::{AppendError, AppendErrorInternal, StorageError},
+    metrics,
+};
 
 // N.B. Ultimately capped by streamer::MAX_INFLIGHT_APPENDS
 const MAX_INFLIGHT_BATCHES: usize = 100;
@@ -28,12 +32,15 @@ impl Backend {
         stream: StreamName,
         input: AppendInput,
     ) -> Result<AppendAck, AppendError> {
+        metrics::observe_append_batch_size(input.records.metered_size(), input.records.len());
+        let start = Instant::now();
         let client = self
             .streamer_client_with_auto_create::<AppendError>(&basin, &stream, |config| {
                 config.create_stream_on_append
             })
             .await?;
         let ack = client.append(input, None).await?;
+        metrics::observe_append_ack_latency(start.elapsed());
         Ok(ack)
     }
 
@@ -56,14 +63,19 @@ impl Backend {
                         && inflight_bytes <= MAX_INFLIGHT_BYTES
                     ) => {
                         let metered_size = input.records.metered_size();
+                        metrics::observe_append_batch_size(input.records.len(), metered_size);
                         inflight_bytes += metered_size;
+                        let start = Instant::now();
                         let fut = client
                             .append(input, Some(session.clone()))
-                            .map(move |res| (metered_size, res));
+                            .map(move |res| (metered_size, start, res));
                         futs.push_back(fut);
                     }
-                    Some((metered_size, res)) = futs.next() => {
+                    Some((metered_size, start, res)) = futs.next() => {
                         inflight_bytes -= metered_size;
+                        if res.is_ok() {
+                            metrics::observe_append_ack_latency(start.elapsed());
+                        }
                         yield res.map_err(AppendError::from);
                     }
                     else => {
