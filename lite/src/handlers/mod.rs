@@ -1,4 +1,4 @@
-mod v1;
+pub mod v1;
 
 async fn metrics() -> impl axum::response::IntoResponse {
     let body = crate::metrics::gather();
