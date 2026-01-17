@@ -30,7 +30,7 @@
 
 It uses [SlateDB](https://slatedb.io) as its storage engine, which relies entirely on object storage for durability.
 
-It is easy to run `s2-lite` against object stores like AWS S3, GCP GCS, and Cloudflare R2. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
+It is easy to run `s2-lite` against object stores like AWS S3 and Tigris. It is a single-node binary with no other external dependencies. Just like [s2.dev](https://s2.dev), data is always durable on object storage before being acknowledged or returned to readers.
 
 You can also simply not specify a `--bucket`, which makes it operate entirely in-memory. This is great for integration tests involving S2.
 
@@ -105,45 +105,32 @@ nc starwars.s2.dev 23 | s2 append s2://liteness/starwars
 
 ### Monitoring
 
-**Readiness** `/ping` will `pong`
+*Readiness* `/ping` will `pong`
 
-**Metrics** `/metrics` returns Prometheus text format
+*Metrics* `/metrics` returns Prometheus text format
 
-### Design
+### Internals
 
-[Concepts](https://s2.dev/docs/concepts)
-
-- HTTP API is implemented using [axum](https://github.com/tokio-rs/axum).
-- Each stream maps to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers.
-- Appends are pipelined to improve performance against high-latency object storage.
-- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data model in sl8.
-
-### SlateDB settings
+#### SlateDB settings
 
 [Settings reference](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#fields)
 
 Use `SL8_` prefixed environment variables, e.g.:
 
 ```bash
+# defaults to 40ms
 SL8_FLUSH_INTERVAL=10ms
 ```
 
-### API Coverage
+#### Design
 
-> [!TIP]
-> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
+[Concepts](https://s2.dev/docs/concepts)
 
-**Fully supported**
-- `/basins`
-- `/streams`
-- `/streams/{stream}/records`
-
-> [!IMPORTANT]
-> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
-
-**Not supported**
-- `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
-- `/metrics`
+- HTTP serving is implemented using [axum](https://github.com/tokio-rs/axum)
+- Each stream corresponds to a Tokio task called [`streamer`](lite/src/backend/streamer.rs) that owns the current `tail` position, serializes appends, and broadcasts acknowledged records to followers
+- Appends are pipelined to improve performance against high-latency object storage
+  - **Temporary** [disabled by default](https://github.com/s2-streamstore/s2/issues/48), you can try it with `S2LITE_PIPELINE=true`
+- [`lite::backend::kv::Key`](lite/src/backend/kv/mod.rs) documents the data modeling in SlateDB
 
 ### Caveats
 
@@ -161,3 +148,20 @@ SL8_FLUSH_INTERVAL=10ms
 - [Rust SDK](https://github.com/s2-streamstore/s2-sdk-rust) ✅ v0.22+
 - [Python](https://github.com/s2-streamstore/s2-sdk-python) 🚧 _needs to be migrated to v1 API_
 - [Java](https://github.com/s2-streamstore/s2-sdk-java) 🚧 _needs to be migrated to v1 API_
+
+### API Coverage
+
+> [!TIP]
+> Complete [specs](api/specs/s2/v1) are available: [OpenAPI](https://s2.dev/docs/api) for the REST-ful core, [Protobuf](https://buf.build/streamstore/s2/docs/main:s2.v1) definitions, and [S2S](https://s2.dev/docs/api/records/overview#s2s-spec) which is the streaming session protocol.
+
+**Fully supported**
+- `/basins`
+- `/streams`
+- `/streams/{stream}/records`
+
+> [!IMPORTANT]
+> Unlike the cloud service where the basin is implicit as a subdomain, `/streams/*` requests **must** specify the basin using the `S2-Basin` header. The SDKs take care of this automatically.
+
+**Not supported**
+- `/access-tokens` https://github.com/s2-streamstore/s2/issues/28
+- `/metrics`
