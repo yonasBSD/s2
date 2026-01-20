@@ -93,8 +93,8 @@ async fn main() -> eyre::Result<()> {
     let append_inflight_max = if std::env::var("S2LITE_PIPELINE")
         .is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
     {
-        info!("pipelining enabled on append sessions up to 10MiB");
-        ByteSize::mib(10)
+        info!("pipelining enabled on append sessions up to 25MiB");
+        ByteSize::mib(25)
     } else {
         info!("pipelining disabled");
         ByteSize::b(1)
