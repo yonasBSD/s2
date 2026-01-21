@@ -37,7 +37,7 @@ You can also simply not specify a `--bucket`, which makes it operate entirely in
 ### Quickstart
 
 > [!NOTE]
-> Point CLI or SDKs at your lite instance like this:
+> Point the [S2 CLI](https://s2.dev/docs/quickstart) or [SDKs](https://s2.dev/docs/sdk) at your lite instance like this:
 > ```bash
 > export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
 > export S2_BASIN_ENDPOINT="http://localhost:8080"
