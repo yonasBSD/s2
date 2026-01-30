@@ -315,23 +315,29 @@ fn render_section_header(title: &str, width: usize) -> Line<'static> {
 }
 
 /// Render text input with cursor
-fn render_text_input(
+fn render_text_input_with_cursor(
     value: &str,
     is_editing: bool,
     placeholder: &str,
     color: Color,
+    cursor: usize,
 ) -> Vec<Span<'static>> {
     if value.is_empty() && !is_editing {
         vec![Span::styled(
             placeholder.to_string(),
             Style::default().fg(GRAY_600).italic(),
         )]
+    } else if is_editing {
+        let cursor = cursor.min(value.len());
+        let before = &value[..cursor];
+        let after = &value[cursor..];
+        vec![
+            Span::styled(before.to_string(), Style::default().fg(color)),
+            Span::styled(CURSOR, Style::default().fg(CYAN)),
+            Span::styled(after.to_string(), Style::default().fg(color)),
+        ]
     } else {
-        let mut spans = vec![Span::styled(value.to_string(), Style::default().fg(color))];
-        if is_editing {
-            spans.push(Span::styled(CURSOR, Style::default().fg(CYAN)));
-        }
-        spans
+        vec![Span::styled(value.to_string(), Style::default().fg(color))]
     }
 }
 
@@ -497,12 +503,30 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &SetupState) {
             Span::styled(CURSOR, Style::default().fg(CYAN)),
         ]
     } else {
-        let display = truncate_str(&state.access_token, 40, "...");
+        let max_width = 40;
+        let cursor = state.cursor.min(state.access_token.len());
+        let (display, cursor_in_display) = if state.access_token.len() <= max_width {
+            (state.access_token.clone(), cursor)
+        } else {
+            // Show a window around the cursor
+            let half = max_width / 2;
+            let start = cursor.saturating_sub(half);
+            let end = (start + max_width).min(state.access_token.len());
+            let start = if end == state.access_token.len() {
+                end.saturating_sub(max_width)
+            } else {
+                start
+            };
+            (state.access_token[start..end].to_string(), cursor - start)
+        };
+        let before = &display[..cursor_in_display];
+        let after = &display[cursor_in_display..];
         vec![
             Span::styled("Token ", Style::default().fg(TEXT_MUTED)),
             Span::styled("› ", Style::default().fg(CYAN)),
-            Span::styled(display, Style::default().fg(WHITE)),
+            Span::styled(before.to_string(), Style::default().fg(WHITE)),
             Span::styled(CURSOR, Style::default().fg(CYAN)),
+            Span::styled(after.to_string(), Style::default().fg(WHITE)),
         ]
     };
     lines.push(Line::from(token_display));
@@ -608,7 +632,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
         "Access Token",
         token_display,
         state.selected == 0,
-        is_editing_token,
+        if is_editing_token {
+            Some(state.cursor)
+        } else {
+            None
+        },
         Some("Space to toggle visibility"),
     );
     draw_settings_field(
@@ -621,7 +649,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
             state.account_endpoint.clone()
         },
         state.selected == 1,
-        state.editing && state.selected == 1,
+        if state.editing && state.selected == 1 {
+            Some(state.cursor)
+        } else {
+            None
+        },
         None,
     );
     draw_settings_field(
@@ -634,7 +666,11 @@ fn draw_settings(f: &mut Frame, area: Rect, state: &SettingsState) {
             state.basin_endpoint.clone()
         },
         state.selected == 2,
-        state.editing && state.selected == 2,
+        if state.editing && state.selected == 2 {
+            Some(state.cursor)
+        } else {
+            None
+        },
         None,
     );
     let compression_label = Line::from(vec![Span::styled(
@@ -735,7 +771,7 @@ fn draw_settings_field(
     label: &str,
     value: String,
     selected: bool,
-    editing: bool,
+    cursor: Option<usize>,
     hint: Option<&str>,
 ) {
     let label_line = Line::from(vec![
@@ -757,8 +793,11 @@ fn draw_settings_field(
         Style::default().fg(BORDER)
     };
 
-    let value_display = if editing {
-        format!("{}█", value)
+    let value_display = if let Some(cursor_pos) = cursor {
+        let cursor_pos = cursor_pos.min(value.len());
+        let before = &value[..cursor_pos];
+        let after = &value[cursor_pos..];
+        format!("{}█{}", before, after)
     } else {
         value
     };
@@ -4483,6 +4522,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             delete_on_empty_min_age,
             selected,
             editing,
+            cursor,
         } => {
             use crate::tui::app::BasinScopeOption;
 
@@ -4545,11 +4585,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 YELLOW
             };
             let mut name_spans = vec![ind, lbl, Span::raw("  ")];
-            name_spans.extend(render_text_input(
+            name_spans.extend(render_text_input_with_cursor(
                 name,
                 *selected == 0 && *editing,
                 "enter name...",
                 name_color,
+                *cursor,
             ));
             lines.push(Line::from(name_spans));
 
@@ -4634,11 +4675,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *retention_policy == RetentionPolicyOption::Age {
                 let (ind, lbl) = render_field_row_bold(4, "  Duration", *selected);
                 let mut duration_spans = vec![ind, lbl, Span::raw("  ")];
-                duration_spans.extend(render_text_input(
+                duration_spans.extend(render_text_input_with_cursor(
                     retention_age_input,
                     *selected == 4 && *editing,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 duration_spans.push(Span::styled(
                     "  e.g. 7d, 30d, 1y",
@@ -4721,11 +4763,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *delete_on_empty_enabled {
                 let (ind, lbl) = render_field_row_bold(8, "  Threshold", *selected);
                 let mut threshold_spans = vec![ind, lbl, Span::raw("  ")];
-                threshold_spans.extend(render_text_input(
+                threshold_spans.extend(render_text_input_with_cursor(
                     delete_on_empty_min_age,
                     *selected == 8 && *editing,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 threshold_spans.push(Span::styled(
                     "  e.g. 1h, 7d",
@@ -4817,6 +4860,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             delete_on_empty_min_age,
             selected,
             editing,
+            cursor,
         } => {
             // Storage options
             let storage_opts = [
@@ -4873,11 +4917,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let (ind, lbl) = render_field_row(0, "Name", *selected);
             let name_color = if name.is_empty() { GRAY_600 } else { CYAN };
             let mut name_spans = vec![ind, lbl, Span::raw("  ")];
-            name_spans.extend(render_text_input(
+            name_spans.extend(render_text_input_with_cursor(
                 name,
                 *selected == 0 && *editing,
                 "enter name...",
                 name_color,
+                *cursor,
             ));
             lines.push(Line::from(name_spans));
 
@@ -4932,11 +4977,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *retention_policy == RetentionPolicyOption::Age {
                 let (ind, lbl) = render_field_row(3, "  Duration", *selected);
                 let mut duration_spans = vec![ind, lbl, Span::raw("  ")];
-                duration_spans.extend(render_text_input(
+                duration_spans.extend(render_text_input_with_cursor(
                     retention_age_input,
                     *selected == 3 && *editing,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 duration_spans.push(Span::styled(
                     "  e.g. 7d, 30d, 1y",
@@ -5019,11 +5065,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *delete_on_empty_enabled {
                 let (ind, lbl) = render_field_row(7, "  Threshold", *selected);
                 let mut threshold_spans = vec![ind, lbl, Span::raw("  ")];
-                threshold_spans.extend(render_text_input(
+                threshold_spans.extend(render_text_input_with_cursor(
                     delete_on_empty_min_age,
                     *selected == 7 && *editing,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 threshold_spans.push(Span::styled(
                     "  e.g. 1h, 7d",
@@ -5129,6 +5176,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             selected,
             editing_age,
             age_input,
+            cursor,
         } => {
             // Options
             let storage_opts = [
@@ -5227,11 +5275,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                     format!("{}s", retention_age_secs)
                 };
                 let mut duration_spans = vec![ind, lbl, Span::raw("  ")];
-                duration_spans.extend(render_text_input(
+                duration_spans.extend(render_text_input_with_cursor(
                     &age_display,
                     *selected == 2 && *editing_age,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 duration_spans.push(Span::styled(
                     "  e.g. 604800 (7 days)",
@@ -5354,6 +5403,8 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             selected,
             editing_age,
             age_input,
+            cursor,
+            ..
         } => {
             // Options
             let storage_opts = [
@@ -5458,11 +5509,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                     format!("{}s", retention_age_secs)
                 };
                 let mut duration_spans = vec![ind, lbl, Span::raw("  ")];
-                duration_spans.extend(render_text_input(
+                duration_spans.extend(render_text_input_with_cursor(
                     &age_display,
                     *selected == 2 && *editing_age,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 duration_spans.push(Span::styled(
                     "  e.g. 604800 (7 days)",
@@ -5548,11 +5600,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *delete_on_empty_enabled {
                 let (ind, lbl) = render_field_row(6, "  Threshold", *selected);
                 let mut threshold_spans = vec![ind, lbl, Span::raw("  ")];
-                threshold_spans.extend(render_text_input(
+                threshold_spans.extend(render_text_input_with_cursor(
                     delete_on_empty_min_age,
                     *selected == 6 && *editing_age,
                     "",
                     YELLOW,
+                    *cursor,
                 ));
                 threshold_spans.push(Span::styled(
                     "  e.g. 1h, 7d",
@@ -5587,6 +5640,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             output_file,
             selected,
             editing,
+            cursor,
         } => {
             // Unit options for "time ago"
             let unit_str = match ago_unit {
@@ -5630,11 +5684,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             ));
             seq_spans.push(lbl);
             seq_spans.push(Span::raw("  "));
-            seq_spans.extend(render_text_input(
+            seq_spans.extend(render_text_input_with_cursor(
                 seq_num_value,
                 *selected == 0 && *editing,
                 "0",
                 if is_seq { CYAN } else { TEXT_MUTED },
+                *cursor,
             ));
             lines.push(Line::from(seq_spans));
 
@@ -5648,11 +5703,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             ));
             ts_spans.push(lbl);
             ts_spans.push(Span::raw("  "));
-            ts_spans.extend(render_text_input(
+            ts_spans.extend(render_text_input_with_cursor(
                 timestamp_value,
                 *selected == 1 && *editing,
                 "0",
                 if is_ts { CYAN } else { TEXT_MUTED },
+                *cursor,
             ));
             ts_spans.push(Span::styled("  ms", Style::default().fg(TEXT_MUTED)));
             lines.push(Line::from(ts_spans));
@@ -5667,11 +5723,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             ));
             ago_spans.push(lbl);
             ago_spans.push(Span::raw("  "));
-            ago_spans.extend(render_text_input(
+            ago_spans.extend(render_text_input_with_cursor(
                 ago_value,
                 *selected == 2 && *editing,
                 "5",
                 if is_ago { CYAN } else { TEXT_MUTED },
+                *cursor,
             ));
             ago_spans.push(Span::styled(
                 format!(" {}", unit_str),
@@ -5693,11 +5750,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             ));
             off_spans.push(lbl);
             off_spans.push(Span::raw("  "));
-            off_spans.extend(render_text_input(
+            off_spans.extend(render_text_input_with_cursor(
                 tail_offset_value,
                 *selected == 3 && *editing,
                 "10",
                 if is_off { CYAN } else { TEXT_MUTED },
+                *cursor,
             ));
             off_spans.push(Span::styled("  back", Style::default().fg(TEXT_MUTED)));
             lines.push(Line::from(off_spans));
@@ -5710,33 +5768,36 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             // Row 4: Max records
             let (ind, lbl) = render_field_row(4, "Max records", *selected);
             let mut count_spans = vec![ind, lbl, Span::raw("  ")];
-            count_spans.extend(render_text_input(
+            count_spans.extend(render_text_input_with_cursor(
                 count_limit,
                 *selected == 4 && *editing,
                 "∞ unlimited",
                 YELLOW,
+                *cursor,
             ));
             lines.push(Line::from(count_spans));
 
             // Row 5: Max bytes
             let (ind, lbl) = render_field_row(5, "Max bytes", *selected);
             let mut bytes_spans = vec![ind, lbl, Span::raw("  ")];
-            bytes_spans.extend(render_text_input(
+            bytes_spans.extend(render_text_input_with_cursor(
                 byte_limit,
                 *selected == 5 && *editing,
                 "∞ unlimited",
                 YELLOW,
+                *cursor,
             ));
             lines.push(Line::from(bytes_spans));
 
             // Row 6: Until timestamp
             let (ind, lbl) = render_field_row(6, "Until", *selected);
             let mut until_spans = vec![ind, lbl, Span::raw("  ")];
-            until_spans.extend(render_text_input(
+            until_spans.extend(render_text_input_with_cursor(
                 until_timestamp,
                 *selected == 6 && *editing,
                 "∞ unlimited",
                 YELLOW,
+                *cursor,
             ));
             until_spans.push(Span::styled("  ms", Style::default().fg(TEXT_MUTED)));
             lines.push(Line::from(until_spans));
@@ -5789,11 +5850,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             lines.push(Line::from(""));
             let (ind, lbl) = render_field_row(9, "Output file", *selected);
             let mut output_spans = vec![ind, lbl, Span::raw("  ")];
-            output_spans.extend(render_text_input(
+            output_spans.extend(render_text_input_with_cursor(
                 output_file,
                 *selected == 9 && *editing,
                 "display only",
                 TEXT_SECONDARY,
+                *cursor,
             ));
             lines.push(Line::from(output_spans));
 
@@ -5824,6 +5886,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             current_token,
             selected,
             editing,
+            cursor,
         } => {
             let mut lines = vec![
                 Line::from(vec![
@@ -5845,11 +5908,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let (ind, lbl) = render_field_row_bold(0, "New Token", *selected);
             let new_color = if new_token.is_empty() { WARNING } else { CYAN };
             let mut new_spans = vec![ind, lbl, Span::raw("  ")];
-            new_spans.extend(render_text_input(
+            new_spans.extend(render_text_input_with_cursor(
                 new_token,
                 *selected == 0 && *editing,
                 "(required)",
                 new_color,
+                *cursor,
             ));
             lines.push(Line::from(new_spans));
 
@@ -5868,11 +5932,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             lines.push(Line::from(""));
             let (ind, lbl) = render_field_row_bold(1, "Current", *selected);
             let mut cur_spans = vec![ind, lbl, Span::raw("  ")];
-            cur_spans.extend(render_text_input(
+            cur_spans.extend(render_text_input_with_cursor(
                 current_token,
                 *selected == 1 && *editing,
                 "(none)",
                 TEXT_SECONDARY,
+                *cursor,
             ));
             lines.push(Line::from(cur_spans));
 
@@ -5915,6 +5980,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             fencing_token,
             selected,
             editing,
+            cursor,
         } => {
             let mut lines = vec![
                 Line::from(vec![
@@ -5944,11 +6010,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
                 YELLOW
             };
             let mut trim_spans = vec![ind, lbl, Span::raw("  ")];
-            trim_spans.extend(render_text_input(
+            trim_spans.extend(render_text_input_with_cursor(
                 trim_point,
                 *selected == 0 && *editing,
                 "(seq num)",
                 trim_color,
+                *cursor,
             ));
             lines.push(Line::from(trim_spans));
 
@@ -5967,11 +6034,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             lines.push(Line::from(""));
             let (ind, lbl) = render_field_row_bold(1, "Fence Token", *selected);
             let mut fence_spans = vec![ind, lbl, Span::raw("  ")];
-            fence_spans.extend(render_text_input(
+            fence_spans.extend(render_text_input_with_cursor(
                 fencing_token,
                 *selected == 1 && *editing,
                 "(none)",
                 TEXT_SECONDARY,
+                *cursor,
             ));
             lines.push(Line::from(fence_spans));
 
@@ -6026,6 +6094,7 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             auto_prefix_streams,
             selected,
             editing,
+            cursor,
         } => {
             use crate::tui::app::ScopeOption;
 
@@ -6054,11 +6123,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             let (ind, lbl) = render_field_row_bold(0, "Token ID", *selected);
             let id_color = if id.is_empty() { WARNING } else { CYAN };
             let mut id_spans = vec![ind, lbl, Span::raw("  ")];
-            id_spans.extend(render_text_input(
+            id_spans.extend(render_text_input_with_cursor(
                 id,
                 *selected == 0 && *editing,
                 "(required)",
                 id_color,
+                *cursor,
             ));
             lines.push(Line::from(id_spans));
 
@@ -6087,11 +6157,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if *expiry == ExpiryOption::Custom {
                 let (ind, lbl) = render_field_row_bold(2, "  Duration", *selected);
                 let mut custom_spans = vec![ind, lbl, Span::raw("  ")];
-                custom_spans.extend(render_text_input(
+                custom_spans.extend(render_text_input_with_cursor(
                     expiry_custom,
                     *selected == 2 && *editing,
                     "e.g. 30d, 1w",
                     YELLOW,
+                    *cursor,
                 ));
                 lines.push(Line::from(custom_spans));
             }
@@ -6114,11 +6185,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if matches!(basins_scope, ScopeOption::Prefix | ScopeOption::Exact) {
                 let (ind, lbl) = render_field_row_bold(4, "  Pattern", *selected);
                 let mut pattern_spans = vec![ind, lbl, Span::raw("  ")];
-                pattern_spans.extend(render_text_input(
+                pattern_spans.extend(render_text_input_with_cursor(
                     basins_value,
                     *selected == 4 && *editing,
                     "enter pattern",
                     TEXT_SECONDARY,
+                    *cursor,
                 ));
                 lines.push(Line::from(pattern_spans));
             }
@@ -6137,11 +6209,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if matches!(streams_scope, ScopeOption::Prefix | ScopeOption::Exact) {
                 let (ind, lbl) = render_field_row_bold(6, "  Pattern", *selected);
                 let mut pattern_spans = vec![ind, lbl, Span::raw("  ")];
-                pattern_spans.extend(render_text_input(
+                pattern_spans.extend(render_text_input_with_cursor(
                     streams_value,
                     *selected == 6 && *editing,
                     "enter pattern",
                     TEXT_SECONDARY,
+                    *cursor,
                 ));
                 lines.push(Line::from(pattern_spans));
             }
@@ -6160,11 +6233,12 @@ fn draw_input_dialog(f: &mut Frame, mode: &InputMode) {
             if matches!(tokens_scope, ScopeOption::Prefix | ScopeOption::Exact) {
                 let (ind, lbl) = render_field_row_bold(8, "  Pattern", *selected);
                 let mut pattern_spans = vec![ind, lbl, Span::raw("  ")];
-                pattern_spans.extend(render_text_input(
+                pattern_spans.extend(render_text_input_with_cursor(
                     tokens_value,
                     *selected == 8 && *editing,
                     "enter pattern",
                     TEXT_SECONDARY,
+                    *cursor,
                 ));
                 lines.push(Line::from(pattern_spans));
             }

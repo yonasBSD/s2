@@ -87,6 +87,7 @@ pub enum Screen {
 #[derive(Debug, Clone, Default)]
 pub struct SetupState {
     pub access_token: String,
+    pub cursor: usize,
     pub error: Option<String>,
     pub validating: bool,
 }
@@ -275,6 +276,7 @@ pub struct SettingsState {
     pub compression: CompressionOption,
     pub selected: usize, // 0=token, 1=account_endpoint, 2=basin_endpoint, 3=compression
     pub editing: bool,
+    pub cursor: usize,
     pub has_changes: bool,
     pub message: Option<String>,
 }
@@ -289,6 +291,7 @@ impl Default for SettingsState {
             compression: CompressionOption::None,
             selected: 0,
             editing: false,
+            cursor: 0,
             has_changes: false,
             message: None,
         }
@@ -636,6 +639,7 @@ pub enum InputMode {
         delete_on_empty_min_age: String,
         selected: usize,
         editing: bool,
+        cursor: usize,
     },
     /// Creating a new stream
     CreateStream {
@@ -650,6 +654,7 @@ pub enum InputMode {
         delete_on_empty_min_age: String,
         selected: usize,
         editing: bool,
+        cursor: usize,
     },
     /// Confirming basin deletion
     ConfirmDeleteBasin { basin: BasinName },
@@ -671,6 +676,7 @@ pub enum InputMode {
         selected: usize,
         editing_age: bool,
         age_input: String,
+        cursor: usize,
     },
     /// Reconfiguring a stream
     ReconfigureStream {
@@ -686,6 +692,7 @@ pub enum InputMode {
         selected: usize,
         editing_age: bool,
         age_input: String,
+        cursor: usize,
     },
     /// Custom read configuration
     CustomRead {
@@ -705,6 +712,7 @@ pub enum InputMode {
         output_file: String,
         selected: usize,
         editing: bool,
+        cursor: usize,
     },
     /// Fence a stream (set new fencing token)
     Fence {
@@ -714,6 +722,7 @@ pub enum InputMode {
         current_token: String, // Empty = no current token
         selected: usize,       // 0=new_token, 1=current_token, 2=submit
         editing: bool,
+        cursor: usize,
     },
     /// Trim a stream (delete records before seq num)
     Trim {
@@ -723,6 +732,7 @@ pub enum InputMode {
         fencing_token: String, // Empty = no fencing token
         selected: usize,       // 0=trim_point, 1=fencing_token, 2=submit
         editing: bool,
+        cursor: usize,
     },
     /// Issue a new access token
     IssueAccessToken {
@@ -744,6 +754,7 @@ pub enum InputMode {
         auto_prefix_streams: bool,
         selected: usize,
         editing: bool,
+        cursor: usize,
     },
     /// Confirming access token revocation
     ConfirmRevokeToken { token_id: String },
@@ -1158,6 +1169,7 @@ impl App {
             },
             selected: 0,
             editing: false,
+            cursor: 0,
             has_changes: false,
             message: if token_from_env {
                 Some("Token loaded from S2_ACCESS_TOKEN env var".to_string())
@@ -2098,10 +2110,45 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, tx: mpsc::UnboundedSender<Event>) {
-        self.message = None;
+    fn is_text_input_active(&self) -> bool {
+        if !matches!(self.input_mode, InputMode::Normal) {
+            return true;
+        }
+        match &self.screen {
+            Screen::Setup(_) => true,
+            Screen::Settings(s) => s.editing,
+            Screen::BenchView(s) => s.editing,
+            Screen::Basins(s) => s.filter_active,
+            Screen::Streams(s) => s.filter_active,
+            Screen::AccessTokens(s) => s.filter_active,
+            Screen::AppendView(s) => s.editing,
+            _ => false,
+        }
+    }
+
+    fn handle_text_input(&mut self, key: KeyEvent, tx: mpsc::UnboundedSender<Event>) {
         if !matches!(self.input_mode, InputMode::Normal) {
             self.handle_input_key(key, tx);
+            return;
+        }
+        match &self.screen {
+            Screen::Setup(_) => self.handle_setup_key(key, tx),
+            Screen::Settings(_) => self.handle_settings_key(key, tx),
+            Screen::BenchView(_) => self.handle_bench_view_key(key, tx),
+            Screen::Basins(_) => self.handle_basins_key(key, tx),
+            Screen::Streams(_) => self.handle_streams_key(key, tx),
+            Screen::AccessTokens(_) => self.handle_access_tokens_key(key, tx),
+            Screen::AppendView(_) => self.handle_append_view_key(key, tx),
+            _ => {}
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, tx: mpsc::UnboundedSender<Event>) {
+        self.message = None;
+
+        // Text input modes bypass global keybindings
+        if self.is_text_input_active() {
+            self.handle_text_input(key, tx);
             return;
         }
         match key.code {
@@ -2155,8 +2202,7 @@ impl App {
             }
         }
         match &self.screen {
-            Screen::Splash => {} // Keys handled in run loop
-            Screen::Setup(_) => self.handle_setup_key(key, tx),
+            Screen::Splash | Screen::Setup(_) => {}
             Screen::Basins(_) => self.handle_basins_key(key, tx),
             Screen::Streams(_) => self.handle_streams_key(key, tx),
             Screen::StreamDetail(_) => self.handle_stream_detail_key(key, tx),
@@ -2193,6 +2239,7 @@ impl App {
                 auto_prefix_streams,
                 selected,
                 editing,
+                ..
             } = &self.input_mode
             && *selected == 16
             && !*editing
@@ -2253,34 +2300,64 @@ impl App {
                 delete_on_empty_min_age,
                 selected,
                 editing,
+                cursor,
             } => {
                 const FIELD_COUNT: usize = 12;
 
                 if *editing {
+                    let field: Option<&mut String> = match *selected {
+                        0 => Some(name),
+                        4 => Some(retention_age_input),
+                        8 => Some(delete_on_empty_min_age),
+                        _ => None,
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
                         }
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            if let Some(f) = field {
+                                *cursor = (*cursor + 1).min(f.len());
+                            }
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            if let Some(f) = field {
+                                *cursor = f.len();
+                            }
+                        }
                         KeyCode::Backspace => {
-                            if *selected == 0 {
-                                name.pop();
-                            } else if *selected == 4 {
-                                retention_age_input.pop();
-                            } else if *selected == 8 {
-                                delete_on_empty_min_age.pop();
+                            if let Some(f) = field
+                                && *cursor > 0
+                            {
+                                f.remove(*cursor - 1);
+                                *cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if let Some(f) = field
+                                && *cursor < f.len()
+                            {
+                                f.remove(*cursor);
                             }
                         }
                         KeyCode::Char(c) => {
                             if *selected == 0 {
                                 if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
-                                    name.push(c);
+                                    name.insert(*cursor, c);
+                                    *cursor += 1;
                                 }
-                            } else if *selected == 4 {
-                                if c.is_ascii_alphanumeric() {
-                                    retention_age_input.push(c);
-                                }
+                            } else if *selected == 4 && c.is_ascii_alphanumeric() {
+                                retention_age_input.insert(*cursor, c);
+                                *cursor += 1;
                             } else if *selected == 8 && c.is_ascii_alphanumeric() {
-                                delete_on_empty_min_age.push(c);
+                                delete_on_empty_min_age.insert(*cursor, c);
+                                *cursor += 1;
                             }
                         }
                         _ => {}
@@ -2318,47 +2395,50 @@ impl App {
                                 }
                             }
                         }
-                        KeyCode::Enter => {
-                            match *selected {
-                                0 => *editing = true, // Edit name
-                                4 => {
-                                    if *retention_policy == RetentionPolicyOption::Age {
-                                        *editing = true; // Edit retention age
-                                    }
-                                }
-                                8 => {
-                                    if *delete_on_empty_enabled {
-                                        *editing = true; // Edit delete-on-empty min age
-                                    }
-                                }
-                                11 => {
-                                    if name.len() >= 8 {
-                                        let basin_name = name.clone();
-                                        let basin_scope = *scope;
-                                        let csoa = *create_stream_on_append;
-                                        let csor = *create_stream_on_read;
-                                        let sc = storage_class.clone();
-                                        let rp = *retention_policy;
-                                        let rai = retention_age_input.clone();
-                                        let tm = timestamping_mode.clone();
-                                        let tu = *timestamping_uncapped;
-                                        let doe = *delete_on_empty_enabled;
-                                        let doema = delete_on_empty_min_age.clone();
-
-                                        let config = build_basin_config(
-                                            csoa, csor, sc, rp, rai, tm, tu, doe, doema,
-                                        );
-                                        self.create_basin_with_config(
-                                            basin_name,
-                                            basin_scope,
-                                            config,
-                                            tx.clone(),
-                                        );
-                                    }
-                                }
-                                _ => {}
+                        KeyCode::Enter => match *selected {
+                            0 => {
+                                *cursor = name.len();
+                                *editing = true;
                             }
-                        }
+                            4 => {
+                                if *retention_policy == RetentionPolicyOption::Age {
+                                    *cursor = retention_age_input.len();
+                                    *editing = true;
+                                }
+                            }
+                            8 => {
+                                if *delete_on_empty_enabled {
+                                    *cursor = delete_on_empty_min_age.len();
+                                    *editing = true;
+                                }
+                            }
+                            11 => {
+                                if name.len() >= 8 {
+                                    let basin_name = name.clone();
+                                    let basin_scope = *scope;
+                                    let csoa = *create_stream_on_append;
+                                    let csor = *create_stream_on_read;
+                                    let sc = storage_class.clone();
+                                    let rp = *retention_policy;
+                                    let rai = retention_age_input.clone();
+                                    let tm = timestamping_mode.clone();
+                                    let tu = *timestamping_uncapped;
+                                    let doe = *delete_on_empty_enabled;
+                                    let doema = delete_on_empty_min_age.clone();
+
+                                    let config = build_basin_config(
+                                        csoa, csor, sc, rp, rai, tm, tu, doe, doema,
+                                    );
+                                    self.create_basin_with_config(
+                                        basin_name,
+                                        basin_scope,
+                                        config,
+                                        tx.clone(),
+                                    );
+                                }
+                            }
+                            _ => {}
+                        },
                         KeyCode::Char(' ') => match *selected {
                             6 => *timestamping_uncapped = !*timestamping_uncapped,
                             9 => *create_stream_on_append = !*create_stream_on_append,
@@ -2396,32 +2476,62 @@ impl App {
                 delete_on_empty_min_age,
                 selected,
                 editing,
+                cursor,
             } => {
                 const FIELD_COUNT: usize = 9;
 
                 if *editing {
+                    let field: Option<&mut String> = match *selected {
+                        0 => Some(name),
+                        3 => Some(retention_age_input),
+                        7 => Some(delete_on_empty_min_age),
+                        _ => None,
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
                         }
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            if let Some(f) = field {
+                                *cursor = (*cursor + 1).min(f.len());
+                            }
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            if let Some(f) = field {
+                                *cursor = f.len();
+                            }
+                        }
                         KeyCode::Backspace => {
-                            if *selected == 0 {
-                                name.pop();
-                            } else if *selected == 3 {
-                                retention_age_input.pop();
-                            } else if *selected == 7 {
-                                delete_on_empty_min_age.pop();
+                            if let Some(f) = field
+                                && *cursor > 0
+                            {
+                                f.remove(*cursor - 1);
+                                *cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if let Some(f) = field
+                                && *cursor < f.len()
+                            {
+                                f.remove(*cursor);
                             }
                         }
                         KeyCode::Char(c) => {
                             if *selected == 0 {
-                                name.push(c);
-                            } else if *selected == 3 {
-                                if c.is_ascii_alphanumeric() {
-                                    retention_age_input.push(c);
-                                }
+                                name.insert(*cursor, c);
+                                *cursor += 1;
+                            } else if *selected == 3 && c.is_ascii_alphanumeric() {
+                                retention_age_input.insert(*cursor, c);
+                                *cursor += 1;
                             } else if *selected == 7 && c.is_ascii_alphanumeric() {
-                                delete_on_empty_min_age.push(c);
+                                delete_on_empty_min_age.insert(*cursor, c);
+                                *cursor += 1;
                             }
                         }
                         _ => {}
@@ -2459,44 +2569,47 @@ impl App {
                                 }
                             }
                         }
-                        KeyCode::Enter => {
-                            match *selected {
-                                0 => *editing = true, // Edit name
-                                3 => {
-                                    if *retention_policy == RetentionPolicyOption::Age {
-                                        *editing = true; // Edit retention age
-                                    }
-                                }
-                                7 => {
-                                    if *delete_on_empty_enabled {
-                                        *editing = true; // Edit delete-on-empty min age
-                                    }
-                                }
-                                8 => {
-                                    if !name.is_empty() {
-                                        let basin_name = basin.clone();
-                                        let stream_name = name.clone();
-                                        let sc = storage_class.clone();
-                                        let rp = *retention_policy;
-                                        let rai = retention_age_input.clone();
-                                        let tm = timestamping_mode.clone();
-                                        let tu = *timestamping_uncapped;
-                                        let doe = *delete_on_empty_enabled;
-                                        let doema = delete_on_empty_min_age.clone();
-
-                                        let config =
-                                            build_stream_config(sc, rp, rai, tm, tu, doe, doema);
-                                        self.create_stream_with_config(
-                                            basin_name,
-                                            stream_name,
-                                            config,
-                                            tx.clone(),
-                                        );
-                                    }
-                                }
-                                _ => {}
+                        KeyCode::Enter => match *selected {
+                            0 => {
+                                *cursor = name.len();
+                                *editing = true;
                             }
-                        }
+                            3 => {
+                                if *retention_policy == RetentionPolicyOption::Age {
+                                    *cursor = retention_age_input.len();
+                                    *editing = true;
+                                }
+                            }
+                            7 => {
+                                if *delete_on_empty_enabled {
+                                    *cursor = delete_on_empty_min_age.len();
+                                    *editing = true;
+                                }
+                            }
+                            8 => {
+                                if !name.is_empty() {
+                                    let basin_name = basin.clone();
+                                    let stream_name = name.clone();
+                                    let sc = storage_class.clone();
+                                    let rp = *retention_policy;
+                                    let rai = retention_age_input.clone();
+                                    let tm = timestamping_mode.clone();
+                                    let tu = *timestamping_uncapped;
+                                    let doe = *delete_on_empty_enabled;
+                                    let doema = delete_on_empty_min_age.clone();
+
+                                    let config =
+                                        build_stream_config(sc, rp, rai, tm, tu, doe, doema);
+                                    self.create_stream_with_config(
+                                        basin_name,
+                                        stream_name,
+                                        config,
+                                        tx.clone(),
+                                    );
+                                }
+                            }
+                            _ => {}
+                        },
                         KeyCode::Char(' ') => {
                             if *selected == 5 {
                                 *timestamping_uncapped = !*timestamping_uncapped;
@@ -2556,6 +2669,7 @@ impl App {
                 selected,
                 editing_age,
                 age_input,
+                cursor,
             } => {
                 const BASIN_MAX_ROW: usize = 6;
                 if *editing_age {
@@ -2566,11 +2680,32 @@ impl App {
                             }
                             *editing_age = false;
                         }
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            *cursor = (*cursor + 1).min(age_input.len());
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            *cursor = age_input.len();
+                        }
                         KeyCode::Backspace => {
-                            age_input.pop();
+                            if *cursor > 0 {
+                                age_input.remove(*cursor - 1);
+                                *cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if *cursor < age_input.len() {
+                                age_input.remove(*cursor);
+                            }
                         }
                         KeyCode::Char(c) if c.is_ascii_digit() => {
-                            age_input.push(c);
+                            age_input.insert(*cursor, c);
+                            *cursor += 1;
                         }
                         _ => {}
                     }
@@ -2610,8 +2745,9 @@ impl App {
                     },
                     KeyCode::Enter => {
                         if *selected == 2 && *retention_policy == RetentionPolicyOption::Age {
-                            *editing_age = true;
                             *age_input = retention_age_secs.to_string();
+                            *cursor = age_input.len();
+                            *editing_age = true;
                         }
                     }
                     KeyCode::Left | KeyCode::Char('h') => match *selected {
@@ -2656,30 +2792,54 @@ impl App {
                 selected,
                 editing_age,
                 age_input,
+                cursor,
             } => {
                 if *editing_age {
+                    let (field, digits_only): (&mut String, bool) = if *selected == 2 {
+                        (age_input, true)
+                    } else {
+                        (delete_on_empty_min_age, false)
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
-                            if *selected == 2 {
-                                if let Ok(secs) = age_input.parse::<u64>() {
-                                    *retention_age_secs = secs;
-                                }
-                            } else if *selected == 6 {
+                            if *selected == 2
+                                && let Ok(secs) = age_input.parse::<u64>()
+                            {
+                                *retention_age_secs = secs;
                             }
                             *editing_age = false;
                         }
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            *cursor = (*cursor + 1).min(field.len());
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            *cursor = field.len();
+                        }
                         KeyCode::Backspace => {
-                            if *selected == 2 {
-                                age_input.pop();
-                            } else if *selected == 6 {
-                                delete_on_empty_min_age.pop();
+                            if *cursor > 0 {
+                                field.remove(*cursor - 1);
+                                *cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if *cursor < field.len() {
+                                field.remove(*cursor);
                             }
                         }
                         KeyCode::Char(c) => {
-                            if *selected == 2 && c.is_ascii_digit() {
-                                age_input.push(c);
-                            } else if *selected == 6 && c.is_ascii_alphanumeric() {
-                                delete_on_empty_min_age.push(c);
+                            if !digits_only || c.is_ascii_digit() {
+                                if *selected == 6 && !c.is_ascii_alphanumeric() {
+                                    // delete_on_empty_min_age only accepts alphanumeric
+                                } else {
+                                    field.insert(*cursor, c);
+                                    *cursor += 1;
+                                }
                             }
                         }
                         _ => {}
@@ -2725,9 +2885,11 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if *selected == 2 && *retention_policy == RetentionPolicyOption::Age {
-                            *editing_age = true;
                             *age_input = retention_age_secs.to_string();
+                            *cursor = age_input.len();
+                            *editing_age = true;
                         } else if *selected == 6 && *delete_on_empty_enabled {
+                            *cursor = delete_on_empty_min_age.len();
                             *editing_age = true;
                         }
                     }
@@ -2780,8 +2942,22 @@ impl App {
                 output_file,
                 selected,
                 editing,
+                cursor,
             } => {
                 if *editing {
+                    let field: Option<&mut String> = match *selected {
+                        0 => Some(seq_num_value),
+                        1 => Some(timestamp_value),
+                        2 => Some(ago_value),
+                        3 => Some(tail_offset_value),
+                        4 => Some(count_limit),
+                        5 => Some(byte_limit),
+                        6 => Some(until_timestamp),
+                        9 => Some(output_file),
+                        _ => None,
+                    };
+                    let digits_only = *selected != 9;
+
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
@@ -2789,46 +2965,44 @@ impl App {
                         KeyCode::Tab if *selected == 2 => {
                             *ago_unit = ago_unit.next();
                         }
-                        KeyCode::Backspace => match *selected {
-                            0 => {
-                                seq_num_value.pop();
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            if let Some(f) = field {
+                                *cursor = (*cursor + 1).min(f.len());
                             }
-                            1 => {
-                                timestamp_value.pop();
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            if let Some(f) = field {
+                                *cursor = f.len();
                             }
-                            2 => {
-                                ago_value.pop();
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(f) = field
+                                && *cursor > 0
+                            {
+                                f.remove(*cursor - 1);
+                                *cursor -= 1;
                             }
-                            3 => {
-                                tail_offset_value.pop();
+                        }
+                        KeyCode::Delete => {
+                            if let Some(f) = field
+                                && *cursor < f.len()
+                            {
+                                f.remove(*cursor);
                             }
-                            4 => {
-                                count_limit.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(f) = field
+                                && (!digits_only || c.is_ascii_digit())
+                            {
+                                f.insert(*cursor, c);
+                                *cursor += 1;
                             }
-                            5 => {
-                                byte_limit.pop();
-                            }
-                            6 => {
-                                until_timestamp.pop();
-                            }
-                            9 => {
-                                output_file.pop();
-                            }
-                            _ => {}
-                        },
-                        KeyCode::Char(c) if c.is_ascii_digit() => match *selected {
-                            0 => seq_num_value.push(c),
-                            1 => timestamp_value.push(c),
-                            2 => ago_value.push(c),
-                            3 => tail_offset_value.push(c),
-                            4 => count_limit.push(c),
-                            5 => byte_limit.push(c),
-                            6 => until_timestamp.push(c),
-                            _ => {}
-                        },
-                        KeyCode::Char(c) if *selected == 9 => {
-                            // Output file accepts any printable char
-                            output_file.push(c);
                         }
                         _ => {}
                     }
@@ -2873,26 +3047,42 @@ impl App {
                         match *selected {
                             0 => {
                                 *start_from = ReadStartFrom::SeqNum;
+                                *cursor = seq_num_value.len();
                                 *editing = true;
                             }
                             1 => {
                                 *start_from = ReadStartFrom::Timestamp;
+                                *cursor = timestamp_value.len();
                                 *editing = true;
                             }
                             2 => {
                                 *start_from = ReadStartFrom::Ago;
+                                *cursor = ago_value.len();
                                 *editing = true;
                             }
                             3 => {
                                 *start_from = ReadStartFrom::TailOffset;
+                                *cursor = tail_offset_value.len();
                                 *editing = true;
                             }
-                            4 => *editing = true, // count_limit
-                            5 => *editing = true, // byte_limit
-                            6 => *editing = true, // until_timestamp
+                            4 => {
+                                *cursor = count_limit.len();
+                                *editing = true;
+                            }
+                            5 => {
+                                *cursor = byte_limit.len();
+                                *editing = true;
+                            }
+                            6 => {
+                                *cursor = until_timestamp.len();
+                                *editing = true;
+                            }
                             7 => *clamp = !*clamp,
                             8 => *format = format.next(),
-                            9 => *editing = true, // output_file
+                            9 => {
+                                *cursor = output_file.len();
+                                *editing = true;
+                            }
                             10 => {
                                 // Start reading - clone all values first
                                 let b = basin.clone();
@@ -2949,26 +3139,45 @@ impl App {
                 current_token,
                 selected,
                 editing,
+                cursor,
             } => {
                 if *editing {
+                    let field: &mut String = if *selected == 0 {
+                        new_token
+                    } else {
+                        current_token
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
                         }
-                        KeyCode::Backspace => match *selected {
-                            0 => {
-                                new_token.pop();
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            *cursor = (*cursor + 1).min(field.len());
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            *cursor = field.len();
+                        }
+                        KeyCode::Backspace => {
+                            if *cursor > 0 {
+                                field.remove(*cursor - 1);
+                                *cursor -= 1;
                             }
-                            1 => {
-                                current_token.pop();
+                        }
+                        KeyCode::Delete => {
+                            if *cursor < field.len() {
+                                field.remove(*cursor);
                             }
-                            _ => {}
-                        },
-                        KeyCode::Char(c) => match *selected {
-                            0 => new_token.push(c),
-                            1 => current_token.push(c),
-                            _ => {}
-                        },
+                        }
+                        KeyCode::Char(c) => {
+                            field.insert(*cursor, c);
+                            *cursor += 1;
+                        }
                         _ => {}
                     }
                     return;
@@ -2991,7 +3200,14 @@ impl App {
                     }
                     KeyCode::Enter => {
                         match *selected {
-                            0 | 1 => *editing = true,
+                            0 => {
+                                *cursor = new_token.len();
+                                *editing = true;
+                            }
+                            1 => {
+                                *cursor = current_token.len();
+                                *editing = true;
+                            }
                             2 => {
                                 // Submit fence
                                 if !new_token.is_empty() {
@@ -3020,26 +3236,47 @@ impl App {
                 fencing_token,
                 selected,
                 editing,
+                cursor,
             } => {
                 if *editing {
+                    let (field, digits_only): (&mut String, bool) = if *selected == 0 {
+                        (trim_point, true)
+                    } else {
+                        (fencing_token, false)
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
                         }
-                        KeyCode::Backspace => match *selected {
-                            0 => {
-                                trim_point.pop();
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            *cursor = (*cursor + 1).min(field.len());
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            *cursor = field.len();
+                        }
+                        KeyCode::Backspace => {
+                            if *cursor > 0 {
+                                field.remove(*cursor - 1);
+                                *cursor -= 1;
                             }
-                            1 => {
-                                fencing_token.pop();
+                        }
+                        KeyCode::Delete => {
+                            if *cursor < field.len() {
+                                field.remove(*cursor);
                             }
-                            _ => {}
-                        },
-                        KeyCode::Char(c) => match *selected {
-                            0 if c.is_ascii_digit() => trim_point.push(c),
-                            1 => fencing_token.push(c),
-                            _ => {}
-                        },
+                        }
+                        KeyCode::Char(c) => {
+                            if !digits_only || c.is_ascii_digit() {
+                                field.insert(*cursor, c);
+                                *cursor += 1;
+                            }
+                        }
                         _ => {}
                     }
                     return;
@@ -3062,7 +3299,14 @@ impl App {
                     }
                     KeyCode::Enter => {
                         match *selected {
-                            0 | 1 => *editing = true,
+                            0 => {
+                                *cursor = trim_point.len();
+                                *editing = true;
+                            }
+                            1 => {
+                                *cursor = fencing_token.len();
+                                *editing = true;
+                            }
                             2 => {
                                 // Submit trim
                                 if let Ok(tp) = trim_point.parse::<u64>() {
@@ -3102,6 +3346,7 @@ impl App {
                 auto_prefix_streams,
                 selected,
                 editing,
+                cursor,
             } => {
                 // Fields: 0=id, 1=expiry, 2=expiry_custom, 3=basins_scope, 4=basins_value,
                 //         5=streams_scope, 6=streams_value, 7=tokens_scope, 8=tokens_value,
@@ -3110,45 +3355,77 @@ impl App {
                 const MAX_FIELD: usize = 16;
 
                 if *editing {
+                    let field: Option<&mut String> = match *selected {
+                        0 => Some(id),
+                        2 => Some(expiry_custom),
+                        4 => Some(basins_value),
+                        6 => Some(streams_value),
+                        8 => Some(tokens_value),
+                        _ => None,
+                    };
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             *editing = false;
                         }
-                        KeyCode::Backspace => match *selected {
-                            0 => {
-                                id.pop();
+                        KeyCode::Left => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            if let Some(f) = field {
+                                *cursor = (*cursor + 1).min(f.len());
                             }
-                            2 => {
-                                expiry_custom.pop();
+                        }
+                        KeyCode::Home => {
+                            *cursor = 0;
+                        }
+                        KeyCode::End => {
+                            if let Some(f) = field {
+                                *cursor = f.len();
                             }
-                            4 => {
-                                basins_value.pop();
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(f) = field
+                                && *cursor > 0
+                            {
+                                f.remove(*cursor - 1);
+                                *cursor -= 1;
                             }
-                            6 => {
-                                streams_value.pop();
+                        }
+                        KeyCode::Delete => {
+                            if let Some(f) = field
+                                && *cursor < f.len()
+                            {
+                                f.remove(*cursor);
                             }
-                            8 => {
-                                tokens_value.pop();
-                            }
-                            _ => {}
-                        },
+                        }
                         KeyCode::Char(c) => {
                             match *selected {
                                 0 => {
                                     // Token ID: letters, numbers, hyphens, underscores
                                     if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                                        id.push(c);
+                                        id.insert(*cursor, c);
+                                        *cursor += 1;
                                     }
                                 }
                                 2 => {
                                     // Custom expiry: e.g., "30d", "1w", "24h"
                                     if c.is_ascii_alphanumeric() {
-                                        expiry_custom.push(c);
+                                        expiry_custom.insert(*cursor, c);
+                                        *cursor += 1;
                                     }
                                 }
-                                4 => basins_value.push(c),
-                                6 => streams_value.push(c),
-                                8 => tokens_value.push(c),
+                                4 => {
+                                    basins_value.insert(*cursor, c);
+                                    *cursor += 1;
+                                }
+                                6 => {
+                                    streams_value.insert(*cursor, c);
+                                    *cursor += 1;
+                                }
+                                8 => {
+                                    tokens_value.insert(*cursor, c);
+                                    *cursor += 1;
+                                }
                                 _ => {}
                             }
                         }
@@ -3252,7 +3529,26 @@ impl App {
                     KeyCode::Char(' ') | KeyCode::Enter => {
                         match *selected {
                             // Text inputs
-                            0 | 2 | 4 | 6 | 8 => *editing = true,
+                            0 => {
+                                *cursor = id.len();
+                                *editing = true;
+                            }
+                            2 => {
+                                *cursor = expiry_custom.len();
+                                *editing = true;
+                            }
+                            4 => {
+                                *cursor = basins_value.len();
+                                *editing = true;
+                            }
+                            6 => {
+                                *cursor = streams_value.len();
+                                *editing = true;
+                            }
+                            8 => {
+                                *cursor = tokens_value.len();
+                                *editing = true;
+                            }
                             // Cycle options
                             1 => *expiry = expiry.next(),
                             3 => *basins_scope = basins_scope.next(),
@@ -3431,6 +3727,7 @@ impl App {
                     delete_on_empty_min_age: "7d".to_string(),
                     selected: 0,
                     editing: false,
+                    cursor: 0,
                 };
             }
             KeyCode::Char('d') => {
@@ -3476,6 +3773,7 @@ impl App {
                         selected: 0,
                         editing_age: false,
                         age_input: String::new(),
+                        cursor: 0,
                     };
                     // Load current config
                     self.load_basin_config(basin_name, tx);
@@ -3664,6 +3962,7 @@ impl App {
                     delete_on_empty_min_age: "7d".to_string(),
                     selected: 0,
                     editing: false,
+                    cursor: 0,
                 };
             }
             KeyCode::Char('d') => {
@@ -3712,6 +4011,7 @@ impl App {
                         selected: 0,
                         editing_age: false,
                         age_input: String::new(),
+                        cursor: 0,
                     };
                     // Load current config
                     self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
@@ -3803,6 +4103,7 @@ impl App {
                     selected: 0,
                     editing_age: false,
                     age_input: String::new(),
+                    cursor: 0,
                 };
                 self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
             }
@@ -4428,6 +4729,7 @@ impl App {
             output_file: String::new(),
             selected: 0,
             editing: false,
+            cursor: 0,
         };
     }
 
@@ -5388,6 +5690,7 @@ impl App {
             current_token: String::new(),
             selected: 0,
             editing: false,
+            cursor: 0,
         };
     }
 
@@ -5400,6 +5703,7 @@ impl App {
             fencing_token: String::new(),
             selected: 0,
             editing: false,
+            cursor: 0,
         };
     }
 
@@ -5652,6 +5956,7 @@ impl App {
                     auto_prefix_streams: false,
                     selected: 0,
                     editing: false,
+                    cursor: 0,
                 };
             }
             KeyCode::Char('d') => {
@@ -5684,7 +5989,7 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
             KeyCode::Esc => {
@@ -5696,13 +6001,11 @@ impl App {
                     return;
                 }
 
-                // Try to create S2 client with the token
                 state.validating = true;
                 state.error = None;
 
                 match Self::create_s2_client(&state.access_token) {
                     Ok(s2) => {
-                        // Save the token to config
                         if let Err(e) = config::set_config_value(
                             ConfigKey::AccessToken,
                             state.access_token.clone(),
@@ -5712,7 +6015,6 @@ impl App {
                             return;
                         }
 
-                        // Set the S2 client and transition to basins
                         self.s2 = Some(s2);
                         self.screen = Screen::Basins(BasinsState {
                             loading: true,
@@ -5730,12 +6032,34 @@ impl App {
                     }
                 }
             }
+            KeyCode::Left => {
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                state.cursor = (state.cursor + 1).min(state.access_token.len());
+            }
+            KeyCode::Home => {
+                state.cursor = 0;
+            }
+            KeyCode::End => {
+                state.cursor = state.access_token.len();
+            }
             KeyCode::Backspace => {
-                state.access_token.pop();
-                state.error = None;
+                if state.cursor > 0 {
+                    state.access_token.remove(state.cursor - 1);
+                    state.cursor -= 1;
+                    state.error = None;
+                }
+            }
+            KeyCode::Delete => {
+                if state.cursor < state.access_token.len() {
+                    state.access_token.remove(state.cursor);
+                    state.error = None;
+                }
             }
             KeyCode::Char(c) => {
-                state.access_token.push(c);
+                state.access_token.insert(state.cursor, c);
+                state.cursor += 1;
                 state.error = None;
             }
             _ => {}
@@ -5750,6 +6074,12 @@ impl App {
 
         // Handle editing mode
         if state.editing {
+            let field = match state.selected {
+                0 => &mut state.access_token,
+                1 => &mut state.account_endpoint,
+                2 => &mut state.basin_endpoint,
+                _ => return,
+            };
             match key.code {
                 KeyCode::Esc => {
                     state.editing = false;
@@ -5758,28 +6088,34 @@ impl App {
                     state.editing = false;
                     state.has_changes = true;
                 }
+                KeyCode::Left => {
+                    state.cursor = state.cursor.saturating_sub(1);
+                }
+                KeyCode::Right => {
+                    state.cursor = (state.cursor + 1).min(field.len());
+                }
+                KeyCode::Home => {
+                    state.cursor = 0;
+                }
+                KeyCode::End => {
+                    state.cursor = field.len();
+                }
                 KeyCode::Backspace => {
-                    match state.selected {
-                        0 => {
-                            state.access_token.pop();
-                        }
-                        1 => {
-                            state.account_endpoint.pop();
-                        }
-                        2 => {
-                            state.basin_endpoint.pop();
-                        }
-                        _ => {}
+                    if state.cursor > 0 {
+                        field.remove(state.cursor - 1);
+                        state.cursor -= 1;
+                        state.has_changes = true;
                     }
-                    state.has_changes = true;
+                }
+                KeyCode::Delete => {
+                    if state.cursor < field.len() {
+                        field.remove(state.cursor);
+                        state.has_changes = true;
+                    }
                 }
                 KeyCode::Char(c) => {
-                    match state.selected {
-                        0 => state.access_token.push(c),
-                        1 => state.account_endpoint.push(c),
-                        2 => state.basin_endpoint.push(c),
-                        _ => {}
-                    }
+                    field.insert(state.cursor, c);
+                    state.cursor += 1;
                     state.has_changes = true;
                 }
                 _ => {}
@@ -5804,6 +6140,12 @@ impl App {
             }
             KeyCode::Char('e') | KeyCode::Enter if state.selected < 3 => {
                 state.editing = true;
+                state.cursor = match state.selected {
+                    0 => state.access_token.len(),
+                    1 => state.account_endpoint.len(),
+                    2 => state.basin_endpoint.len(),
+                    _ => 0,
+                };
             }
             KeyCode::Char('h') | KeyCode::Left if state.selected == 3 => {
                 // Cycle compression option backwards
