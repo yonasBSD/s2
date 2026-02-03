@@ -18,6 +18,7 @@ use s2_common::{
     read_extent::{CountOrBytes, ReadLimit},
     record::{Metered, MeteredSize as _},
     types::{
+        ValidationError,
         basin::BasinName,
         stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
     },
@@ -34,6 +35,54 @@ pub fn router() -> axum::Router<Backend> {
         .route(super::paths::streams::records::CHECK_TAIL, get(check_tail))
         .route(super::paths::streams::records::READ, get(read))
         .route(super::paths::streams::records::APPEND, post(append))
+}
+
+fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceError> {
+    if let ReadFrom::Timestamp(ts) = start.from
+        && end.until.deny(ts)
+    {
+        return Err(ServiceError::Validation(ValidationError(
+            "start `timestamp` exceeds or equal to `until`".to_owned(),
+        )));
+    }
+    Ok(())
+}
+
+fn apply_last_event_id(
+    mut start: ReadStart,
+    mut end: v1t::stream::ReadEnd,
+    last_event_id: Option<v1t::stream::sse::LastEventId>,
+) -> (ReadStart, v1t::stream::ReadEnd) {
+    if let Some(v1t::stream::sse::LastEventId {
+        seq_num,
+        count,
+        bytes,
+    }) = last_event_id
+    {
+        start.from = ReadFrom::SeqNum(seq_num + 1);
+        end.count = end.count.map(|c| c.saturating_sub(count));
+        end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
+    }
+    (start, end)
+}
+
+enum ReadMode {
+    Unary,
+    Streaming,
+}
+
+fn prepare_read(
+    start: ReadStart,
+    end: v1t::stream::ReadEnd,
+    mode: ReadMode,
+) -> Result<(ReadStart, ReadEnd), ServiceError> {
+    let mut end: ReadEnd = end.into();
+    if matches!(mode, ReadMode::Unary) {
+        end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
+        end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
+    }
+    validate_read_until(start, end)?;
+    Ok((start, end))
 }
 
 #[derive(FromRequest)]
@@ -130,15 +179,13 @@ pub async fn read(
         request,
     }: ReadArgs,
 ) -> Result<Response, ServiceError> {
+    let start: ReadStart = start.try_into()?;
     match request {
         v1t::stream::ReadRequest::Unary {
             format,
             response_mime,
         } => {
-            let start: ReadStart = start.try_into()?;
-            let mut end: ReadEnd = end.into();
-            end.limit = ReadLimit::CountOrBytes(end.limit.into_allowance(RECORD_BATCH_MAX));
-            end.wait = end.wait.map(|d| d.min(super::MAX_UNARY_READ_WAIT));
+            let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let session = backend.read(basin, stream, start, end).await?;
             let batch = merge_read_session(session, end.wait).await?;
             match response_mime {
@@ -156,19 +203,9 @@ pub async fn read(
             format,
             last_event_id,
         } => {
-            let mut start: ReadStart = start.try_into()?;
-            let mut end = end;
-            if let Some(v1t::stream::sse::LastEventId {
-                seq_num,
-                count,
-                bytes,
-            }) = last_event_id
-            {
-                start.from = ReadFrom::SeqNum(seq_num + 1);
-                end.count = end.count.map(|c| c.saturating_sub(count));
-                end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
-            }
-            let session = backend.read(basin, stream, start, end.into()).await?;
+            let (start, end) = apply_last_event_id(start, end, last_event_id);
+            let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
+            let session = backend.read(basin, stream, start, end).await?;
             let events = async_stream::stream! {
                 let mut processed = CountOrBytes::ZERO;
                 tokio::pin!(session);
@@ -209,16 +246,20 @@ pub async fn read(
         v1t::stream::ReadRequest::S2s {
             response_compression,
         } => {
-            let s2s_stream = backend
-                .read(basin, stream, start.try_into()?, end.into())
-                .await?
-                .map_ok(|msg| match msg {
-                    ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
-                        records: vec![],
-                        tail: Some(tail.into()),
-                    },
-                    ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
-                });
+            let (start, end) = prepare_read(start, end, ReadMode::Streaming)?;
+            let s2s_stream =
+                backend
+                    .read(basin, stream, start, end)
+                    .await?
+                    .map_ok(|msg| match msg {
+                        ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
+                            records: vec![],
+                            tail: Some(tail.into()),
+                        },
+                        ReadSessionOutput::Batch(batch) => {
+                            v1t::stream::proto::ReadBatch::from(batch)
+                        }
+                    });
             let response_stream = s2s::FramedMessageStream::<_>::new(
                 response_compression,
                 Box::pin(s2s_stream.map_err(ServiceError::from)),
