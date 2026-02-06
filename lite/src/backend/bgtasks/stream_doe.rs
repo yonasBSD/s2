@@ -148,7 +148,7 @@ impl Backend {
         Ok(meets_deadline)
     }
 
-    #[instrument(ret, err, skip(self, deadlines))]
+    #[instrument(ret, err, skip(self, deadlines), fields(num_deadlines = deadlines.len()))]
     async fn clear_doe_deadlines(
         &self,
         stream_id: StreamId,
@@ -165,6 +165,7 @@ impl Backend {
         Ok(())
     }
 
+    #[instrument(ret, err, skip(self))]
     async fn stream_has_records(&self, stream_id: StreamId) -> Result<bool, StorageError> {
         let start_key = kv::stream_record_timestamp::ser_key(
             stream_id,
@@ -173,8 +174,9 @@ impl Backend {
                 timestamp: Timestamp::MIN,
             },
         );
+        // Use Memory durability so TTL filtering advances with wall time even when the DB is idle.
         static SCAN_OPTS: ScanOptions = ScanOptions {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
