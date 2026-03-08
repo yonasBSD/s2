@@ -52,6 +52,20 @@ pub(super) const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 // Rate-limit delete-on-empty scheduling and pad deadlines to cover the period.
 const DOE_DEADLINE_REFRESH_PERIOD: Duration = Duration::from_secs(600);
 
+pub(super) fn doe_arm_delay(retention_age: Duration, min_age: Duration) -> Duration {
+    retention_age
+        .saturating_add(min_age)
+        .saturating_add(DOE_DEADLINE_REFRESH_PERIOD)
+}
+
+pub(super) fn retention_age_or_zero(config: &OptionalStreamConfig) -> Duration {
+    config
+        .retention_policy
+        .unwrap_or_default()
+        .age()
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct StreamerId(u64);
 
@@ -313,11 +327,8 @@ impl Streamer {
             .is_none_or(|t| now.duration_since(t) >= DOE_DEADLINE_REFRESH_PERIOD)
         {
             self.last_doe_deadline_at = Some(now);
-            let deadline = kv::timestamp::TimestampSecs::after(
-                retention_age
-                    .saturating_add(min_age)
-                    .saturating_add(DOE_DEADLINE_REFRESH_PERIOD),
-            );
+            let deadline =
+                kv::timestamp::TimestampSecs::after(doe_arm_delay(retention_age, min_age));
             Some(DeleteOnEmptyDeadline { deadline, min_age })
         } else {
             None
