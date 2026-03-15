@@ -30,6 +30,10 @@ impl<T: StrProps> StreamNameStr<T> {
             return Err(format!("stream {} must not be empty", T::FIELD_NAME).into());
         }
 
+        if !T::IS_PREFIX && (name == "." || name == "..") {
+            return Err(format!("stream {} must not be \".\" or \"..\"", T::FIELD_NAME).into());
+        }
+
         if name.len() > caps::MAX_STREAM_NAME_LEN {
             return Err(format!(
                 "stream {} must not exceed {} bytes in length",
@@ -354,3 +358,63 @@ pub enum ReadSessionOutput {
 }
 
 pub type ListStreamsRequest = ListItemsRequest<StreamNamePrefix, StreamNameStartAfter>;
+
+#[cfg(test)]
+mod test {
+    use rstest::rstest;
+
+    use super::{
+        super::strings::{NameProps, PrefixProps, StartAfterProps},
+        StreamNameStr,
+    };
+
+    #[rstest]
+    #[case::normal("my-stream".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_STREAM_NAME_LEN))]
+    fn validate_name_ok(#[case] name: String) {
+        assert_eq!(StreamNameStr::<NameProps>::validate_str(&name), Ok(()));
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::too_long("a".repeat(crate::caps::MAX_STREAM_NAME_LEN + 1))]
+    fn validate_name_err(#[case] name: String) {
+        StreamNameStr::<NameProps>::validate_str(&name).expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_STREAM_NAME_LEN))]
+    fn validate_prefix_ok(#[case] prefix: String) {
+        assert_eq!(StreamNameStr::<PrefixProps>::validate_str(&prefix), Ok(()));
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_STREAM_NAME_LEN + 1))]
+    fn validate_prefix_err(#[case] prefix: String) {
+        StreamNameStr::<PrefixProps>::validate_str(&prefix).expect_err("expected validation error");
+    }
+
+    #[rstest]
+    #[case::empty("".to_owned())]
+    #[case::dot(".".to_owned())]
+    #[case::dot_dot("..".to_owned())]
+    #[case::max_len("a".repeat(crate::caps::MAX_STREAM_NAME_LEN))]
+    fn validate_start_after_ok(#[case] start_after: String) {
+        assert_eq!(
+            StreamNameStr::<StartAfterProps>::validate_str(&start_after),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    #[case::too_long("a".repeat(crate::caps::MAX_STREAM_NAME_LEN + 1))]
+    fn validate_start_after_err(#[case] start_after: String) {
+        StreamNameStr::<StartAfterProps>::validate_str(&start_after)
+            .expect_err("expected validation error");
+    }
+}
