@@ -4,21 +4,25 @@ use futures::Stream;
 use s2_common::{
     caps,
     read_extent::{EvaluatedReadLimit, ReadLimit, ReadUntil},
-    record::{Metered, MeteredSize as _, SeqNum, SequencedRecord, StreamPosition, Timestamp},
+    record::{Metered, MeteredSize as _, SeqNum, StoredSequencedRecord, StreamPosition, Timestamp},
     types::{
         basin::BasinName,
-        stream::{ReadBatch, ReadEnd, ReadPosition, ReadSessionOutput, ReadStart, StreamName},
+        stream::{
+            ReadEnd, ReadPosition, ReadStart, StoredReadBatch, StoredReadSessionOutput, StreamName,
+        },
     },
 };
 use slatedb::config::{DurabilityLevel, ScanOptions};
 use tokio::{sync::broadcast, time::Instant};
 
 use super::Backend;
-use crate::backend::{
-    error::{
-        CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+use crate::{
+    backend::{
+        error::{
+            CheckTailError, ReadError, StorageError, StreamerMissingInActionError, UnwrittenError,
+        },
+        kv,
     },
-    kv,
     stream_id::StreamId,
 };
 
@@ -86,7 +90,8 @@ impl Backend {
         stream: StreamName,
         start: ReadStart,
         end: ReadEnd,
-    ) -> Result<impl Stream<Item = Result<ReadSessionOutput, ReadError>> + 'static, ReadError> {
+    ) -> Result<impl Stream<Item = Result<StoredReadSessionOutput, ReadError>> + 'static, ReadError>
+    {
         let client = self
             .streamer_client_with_auto_create::<ReadError>(&basin, &stream, |config| {
                 config.create_stream_on_read
@@ -163,7 +168,7 @@ impl Backend {
                                     .map_or(usize::MAX, |n| n.saturating_sub(records.len()))
                                     .min(caps::RECORD_BATCH_MAX.count),
                             );
-                            yield state.on_batch(ReadBatch {
+                            yield state.on_batch(StoredReadBatch {
                                 records: std::mem::replace(&mut records, new_records_buf),
                                 tail: None,
                             });
@@ -173,7 +178,7 @@ impl Backend {
                     }
 
                     if !records.is_empty() {
-                        yield state.on_batch(ReadBatch {
+                        yield state.on_batch(StoredReadBatch {
                             records,
                             tail: None,
                         });
@@ -192,7 +197,7 @@ impl Backend {
                             if state.wait_deadline_expired() {
                                 break;
                             }
-                            yield ReadSessionOutput::Heartbeat(state.tail);
+                            yield StoredReadSessionOutput::Heartbeat(state.tail);
                             while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                                 tokio::select! {
                                     biased;
@@ -203,7 +208,7 @@ impl Backend {
                                                 let tail = super::streamer::next_pos(&records);
                                                 let allowed_count = count_allowed_records(limit, end.until, &records);
                                                 if allowed_count > 0 {
-                                                    yield state.on_batch(ReadBatch {
+                                                    yield state.on_batch(StoredReadBatch {
                                                         records: records.drain(..allowed_count).collect(),
                                                         tail: Some(tail),
                                                     });
@@ -223,7 +228,7 @@ impl Backend {
                                         }
                                     }
                                     _ = new_heartbeat_sleep() => {
-                                        yield ReadSessionOutput::Heartbeat(state.tail);
+                                        yield StoredReadSessionOutput::Heartbeat(state.tail);
                                         Ok(())
                                     }
                                     _ = wait_sleep_until(state.wait_deadline) => {
@@ -314,7 +319,7 @@ impl ReadSessionState {
             .is_some_and(|deadline| deadline <= Instant::now())
     }
 
-    fn on_batch(&mut self, batch: ReadBatch) -> ReadSessionOutput {
+    fn on_batch(&mut self, batch: StoredReadBatch) -> StoredReadSessionOutput {
         if let Some(tail) = batch.tail {
             self.tail = tail;
         }
@@ -324,25 +329,26 @@ impl ReadSessionState {
         };
         let count = batch.records.len();
         let bytes = batch.records.metered_size();
+        let last_position = last_record.position();
         assert!(limit.allow(count, bytes));
-        assert!(self.until.allow(last_record.position.timestamp));
-        self.start_seq_num = last_record.position.seq_num + 1;
+        assert!(self.until.allow(last_position.timestamp));
+        self.start_seq_num = last_position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
         self.reset_wait_deadline();
-        ReadSessionOutput::Batch(batch)
+        StoredReadSessionOutput::Batch(batch)
     }
 }
 
 fn count_allowed_records(
     limit: ReadLimit,
     until: ReadUntil,
-    records: &[Metered<SequencedRecord>],
+    records: &[Metered<StoredSequencedRecord>],
 ) -> usize {
     let mut acc_size = 0;
     let mut acc_count = 0;
     for record in records {
         if limit.deny(acc_count + 1, acc_size + record.metered_size())
-            || until.deny(record.position.timestamp)
+            || until.deny(record.position().timestamp)
         {
             break;
         }
@@ -379,12 +385,14 @@ mod tests {
     use futures::StreamExt;
     use s2_common::{
         read_extent::{ReadLimit, ReadUntil},
+        record::{Metered, Record, StoredRecord},
         types::{
             basin::BasinName,
             config::{BasinConfig, OptionalStreamConfig},
             resources::CreateMode,
             stream::{
-                AppendInput, AppendRecordBatch, AppendRecordParts, ReadEnd, ReadFrom, ReadStart,
+                ReadEnd, ReadFrom, ReadStart, StoredAppendInput, StoredAppendRecord,
+                StoredAppendRecordBatch, StoredAppendRecordParts, StoredReadSessionOutput,
             },
         },
     };
@@ -392,7 +400,25 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::backend::{FOLLOWER_MAX_LAG, kv, stream_id::StreamId, streamer::DORMANT_TIMEOUT};
+    use crate::{
+        backend::{FOLLOWER_MAX_LAG, kv, streamer::DORMANT_TIMEOUT},
+        stream_id::StreamId,
+    };
+
+    fn stored_append_input(record: Record) -> StoredAppendInput {
+        let record: StoredAppendRecord = StoredAppendRecordParts {
+            timestamp: None,
+            record: Metered::from(StoredRecord::from(record)),
+        }
+        .try_into()
+        .unwrap();
+        let records: StoredAppendRecordBatch = vec![record].try_into().unwrap();
+        StoredAppendInput {
+            records,
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
 
     #[tokio::test]
     async fn resolve_timestamp_bounded_to_stream() {
@@ -473,20 +499,8 @@ mod tests {
             .await
             .unwrap();
 
-        let record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap();
-        let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
-        let parts = AppendRecordParts {
-            timestamp: None,
-            record: metered,
-        };
-        let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
-        let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
-        let input = AppendInput {
-            records: batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let input =
+            stored_append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
         let ack = backend
             .append(basin.clone(), stream.clone(), input)
             .await
@@ -627,30 +641,16 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(first, ReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(first, StoredReadSessionOutput::Heartbeat(_)));
 
         let stream_id = StreamId::new(&basin, &stream);
         let mut delete_batch = WriteBatch::new();
         let lagged_appends = FOLLOWER_MAX_LAG + 25;
 
         for i in 0..lagged_appends {
-            let record = s2_common::record::Record::try_from_parts(
-                vec![],
-                bytes::Bytes::from(format!("lagged-{i}")),
-            )
-            .unwrap();
-            let metered: s2_common::record::Metered<s2_common::record::Record> = record.into();
-            let parts = AppendRecordParts {
-                timestamp: None,
-                record: metered,
-            };
-            let append_record: s2_common::types::stream::AppendRecord = parts.try_into().unwrap();
-            let batch: AppendRecordBatch = vec![append_record].try_into().unwrap();
-            let input = AppendInput {
-                records: batch,
-                match_seq_num: None,
-                fencing_token: None,
-            };
+            let input = stored_append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from(format!("lagged-{i}"))).unwrap(),
+            );
             let ack = backend
                 .append(basin.clone(), stream.clone(), input)
                 .await
@@ -703,23 +703,9 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("initial"))
-                .unwrap();
-        let initial_metered: s2_common::record::Metered<s2_common::record::Record> =
-            initial_record.into();
-        let initial_parts = AppendRecordParts {
-            timestamp: None,
-            record: initial_metered,
-        };
-        let initial_append_record: s2_common::types::stream::AppendRecord =
-            initial_parts.try_into().unwrap();
-        let initial_batch: AppendRecordBatch = vec![initial_append_record].try_into().unwrap();
-        let initial_input = AppendInput {
-            records: initial_batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let initial_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
+        );
         backend
             .append(basin.clone(), stream.clone(), initial_input)
             .await
@@ -746,7 +732,7 @@ mod tests {
             .await
             .expect("session should yield initial batch")
             .expect("session should not error");
-        assert!(matches!(first, ReadSessionOutput::Batch(_)));
+        assert!(matches!(first, StoredReadSessionOutput::Batch(_)));
 
         let second = session
             .as_mut()
@@ -754,28 +740,14 @@ mod tests {
             .await
             .expect("session should enter follow mode")
             .expect("session should not error");
-        assert!(matches!(second, ReadSessionOutput::Heartbeat(_)));
+        assert!(matches!(second, StoredReadSessionOutput::Heartbeat(_)));
 
         tokio::time::advance(DORMANT_TIMEOUT + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let follow_record =
-            s2_common::record::Record::try_from_parts(vec![], bytes::Bytes::from("follow-1"))
-                .unwrap();
-        let follow_metered: s2_common::record::Metered<s2_common::record::Record> =
-            follow_record.into();
-        let follow_parts = AppendRecordParts {
-            timestamp: None,
-            record: follow_metered,
-        };
-        let follow_append_record: s2_common::types::stream::AppendRecord =
-            follow_parts.try_into().unwrap();
-        let follow_batch: AppendRecordBatch = vec![follow_append_record].try_into().unwrap();
-        let follow_input = AppendInput {
-            records: follow_batch,
-            match_seq_num: None,
-            fencing_token: None,
-        };
+        let follow_input = stored_append_input(
+            Record::try_from_parts(vec![], bytes::Bytes::from("follow-1")).unwrap(),
+        );
         backend.append(basin, stream, follow_input).await.unwrap();
 
         let next = session
@@ -784,12 +756,12 @@ mod tests {
             .await
             .expect("session should stay open after dormancy")
             .expect("session should not error after dormancy");
-        let ReadSessionOutput::Batch(batch) = next else {
+        let StoredReadSessionOutput::Batch(batch) = next else {
             panic!("expected new batch after append");
         };
         assert_eq!(batch.records.len(), 1);
         let record = batch.records.first().expect("batch should have one record");
-        let s2_common::record::Record::Envelope(envelope) = &record.record else {
+        let StoredRecord::Plaintext(Record::Envelope(envelope)) = record.inner() else {
             panic!("expected envelope record");
         };
         assert_eq!(envelope.body().as_ref(), b"follow-1");

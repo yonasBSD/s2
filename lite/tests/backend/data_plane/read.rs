@@ -3,16 +3,55 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use s2_common::{
+    encryption::{EncryptionAlgorithm, EncryptionConfig},
     read_extent::{ReadLimit, ReadUntil},
-    record::{MeteredSize, StreamPosition},
+    record::{MeteredSize, RecordDecryptionError, StreamPosition},
     types::{
         config::{OptionalStreamConfig, OptionalTimestampingConfig, TimestampingMode},
-        stream::{AppendInput, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart},
+        stream::{
+            AppendInput, ReadEnd, ReadFrom, ReadStart, StoredReadBatch, StoredReadSessionOutput,
+        },
     },
 };
-use s2_lite::backend::error::{CheckTailError, ReadError, UnwrittenError};
+use s2_lite::backend::{
+    Backend,
+    error::{CheckTailError, ReadError, UnwrittenError},
+};
 
 use super::common::*;
+
+fn read_all_bounds() -> (ReadStart, ReadEnd) {
+    (
+        ReadStart {
+            from: ReadFrom::SeqNum(0),
+            clamp: false,
+        },
+        ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::ZERO),
+        },
+    )
+}
+
+async fn first_stored_batch(
+    backend: &Backend,
+    basin: &s2_common::types::basin::BasinName,
+    stream: &s2_common::types::stream::StreamName,
+) -> StoredReadBatch {
+    let (start, end) = read_all_bounds();
+    let read_session = backend
+        .read(basin.clone(), stream.clone(), start, end)
+        .await
+        .expect("Failed to create read session");
+    let mut read_session = Box::pin(read_session);
+    match read_session.next().await {
+        Some(Ok(StoredReadSessionOutput::Batch(batch))) => batch,
+        Some(Ok(other)) => panic!("Unexpected first output: {other:?}"),
+        Some(Err(err)) => panic!("Unexpected backend read error: {err:?}"),
+        None => panic!("Read session ended without delivering batch"),
+    }
+}
 
 #[tokio::test]
 async fn test_check_tail_scenarios() {
@@ -76,6 +115,65 @@ async fn test_read_from_beginning() {
     let records = collect_records(&mut session).await;
 
     assert_eq!(records.len(), 5);
+}
+
+#[tokio::test]
+async fn test_read_encrypted_roundtrip() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) =
+        setup_backend_with_stream("read-enc", "stream", OptionalStreamConfig::default()).await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"secret-1", b"secret-2"],
+        &encryption,
+    )
+    .await;
+
+    let (start, end) = read_all_bounds();
+    let read_session = backend
+        .read(basin_name.clone(), stream_name.clone(), start, end)
+        .await
+        .expect("Failed to create encrypted read session");
+    let mut read_session = Box::pin(read_session);
+    let records =
+        collect_records_with_encryption(&mut read_session, &basin_name, &stream_name, &encryption)
+            .await;
+    assert_eq!(
+        envelope_bodies(&records),
+        vec![b"secret-1".to_vec(), b"secret-2".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn test_read_encrypted_batch_rejects_plaintext_decryption() {
+    let encryption = aegis256_encryption();
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-enc-plain-mismatch",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    append_payloads_with_encryption(
+        &backend,
+        &basin_name,
+        &stream_name,
+        &[b"secret-1", b"secret-2"],
+        &encryption,
+    )
+    .await;
+
+    let batch = first_stored_batch(&backend, &basin_name, &stream_name).await;
+    assert!(matches!(
+        batch.decrypt(&EncryptionConfig::Plain, &[]),
+        Err(RecordDecryptionError::AlgorithmMismatch {
+            expected: None,
+            actual,
+        }) if actual == EncryptionAlgorithm::Aegis256
+    ));
 }
 
 #[tokio::test]
@@ -290,15 +388,15 @@ async fn test_read_timestamp_range() {
         .expect("Failed to create read session");
 
     let mut session = Box::pin(session);
-    let records = loop {
+    let records: Vec<_> = loop {
         let output = tokio::time::timeout(Duration::from_secs(1), session.as_mut().next())
             .await
             .expect("Timed out waiting for read output");
         match output {
-            Some(Ok(ReadSessionOutput::Batch(batch))) => {
-                break batch.records.iter().cloned().collect::<Vec<_>>();
+            Some(Ok(StoredReadSessionOutput::Batch(batch))) => {
+                break decrypt_plain_batch(batch).records.iter().cloned().collect();
             }
-            Some(Ok(ReadSessionOutput::Heartbeat(_))) => continue,
+            Some(Ok(StoredReadSessionOutput::Heartbeat(_))) => continue,
             Some(Err(e)) => panic!("Read error: {:?}", e),
             None => panic!("Read session ended without delivering expected batch"),
         }
@@ -308,7 +406,11 @@ async fn test_read_timestamp_range() {
     let bodies = envelope_bodies(&records);
 
     assert_eq!(bodies, vec![b"ts-200".to_vec()]);
-    assert!(records.iter().all(|record| record.position.timestamp < 300));
+    assert!(
+        records
+            .iter()
+            .all(|record| record.position().timestamp < 300)
+    );
 }
 
 #[tokio::test]
@@ -393,7 +495,7 @@ async fn test_read_from_tail_times_out_without_new_data() {
         .expect("Read session ended unexpectedly");
 
     match first_output {
-        Ok(ReadSessionOutput::Heartbeat(_)) => {}
+        Ok(StoredReadSessionOutput::Heartbeat(_)) => {}
         other => panic!("Unexpected first output: {:?}", other),
     }
 
@@ -441,7 +543,7 @@ async fn test_read_with_bytes_limit() {
     assert!(records.len() >= 2);
     assert!(records.len() <= 4);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 20000);
 }
 
@@ -514,7 +616,7 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     assert!(records.len() <= 5);
     assert!(records.len() < 100);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 50000);
 }
 
@@ -575,7 +677,7 @@ async fn test_read_until_timestamp_basic() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3500)
+            .all(|record| record.position().timestamp < 3500)
     );
 }
 
@@ -628,7 +730,7 @@ async fn test_read_until_timestamp_exact_boundary() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3000)
+            .all(|record| record.position().timestamp < 3000)
     );
 }
 
@@ -881,7 +983,7 @@ async fn test_read_until_with_bytes_limit_bytes_wins() {
     assert!(records.len() >= 2);
     assert!(records.len() <= 3);
 
-    let total_bytes: usize = records.iter().map(|r| r.record.metered_size()).sum();
+    let total_bytes: usize = records.iter().map(|r| r.inner().metered_size()).sum();
     assert!(total_bytes <= 15000);
 }
 
@@ -935,7 +1037,7 @@ async fn test_read_until_with_bytes_limit_timestamp_wins() {
     assert!(
         records
             .iter()
-            .all(|record| record.position.timestamp < 3500)
+            .all(|record| record.position().timestamp < 3500)
     );
 }
 
@@ -988,9 +1090,8 @@ async fn test_read_timestamp_range_with_from_and_until() {
     assert_eq!(records.len(), 2);
     let bodies = envelope_bodies(&records);
     assert_eq!(bodies, vec![b"ts-2500".to_vec(), b"ts-3500".to_vec()]);
-    assert!(
-        records
-            .iter()
-            .all(|record| record.position.timestamp >= 2000 && record.position.timestamp < 4500)
-    );
+    assert!(records.iter().all(|record| {
+        let position = record.position();
+        position.timestamp >= 2000 && position.timestamp < 4500
+    }));
 }

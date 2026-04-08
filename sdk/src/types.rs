@@ -19,6 +19,10 @@ use http::{
 use rand::RngExt;
 use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::caps::RECORD_BATCH_MAX;
+/// Encryption algorithm.
+pub use s2_common::encryption::EncryptionAlgorithm;
+/// Encryption configuration for stream operations.
+pub use s2_common::encryption::EncryptionConfig;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.

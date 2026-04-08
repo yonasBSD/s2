@@ -12,7 +12,10 @@ use slatedb::{
 };
 use tracing::instrument;
 
-use crate::backend::{Backend, error::StorageError, kv, store::db_txn_get, stream_id::StreamId};
+use crate::{
+    backend::{Backend, error::StorageError, kv, store::db_txn_get},
+    stream_id::StreamId,
+};
 
 const PENDING_LIST_LIMIT: usize = 128;
 const CONCURRENCY: usize = 4;
@@ -182,18 +185,20 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        record::{FencingToken, Metered, NonZeroSeqNum, Record, SeqNum, StreamPosition},
+        record::{
+            FencingToken, Metered, NonZeroSeqNum, Record, SeqNum, StoredRecord, StreamPosition,
+        },
         types::{basin::BasinName, config::OptionalStreamConfig, stream::StreamName},
     };
     use slatedb::{WriteBatch, config::WriteOptions};
     use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
-    use crate::backend::{kv, stream_id::StreamId};
+    use crate::{backend::kv, stream_id::StreamId};
 
-    fn test_record() -> Metered<Record> {
+    fn test_record() -> Metered<StoredRecord> {
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"trim-test")).unwrap();
-        record.into()
+        StoredRecord::from(record).into()
     }
 
     fn trim_point(seq_num: SeqNum) -> RangeTo<NonZeroSeqNum> {

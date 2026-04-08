@@ -30,10 +30,9 @@ use super::{
         TransactionConflictError,
     },
     kv,
-    stream_id::StreamId,
     streamer::StreamerClient,
 };
-use crate::backend::bgtasks::BgtaskTrigger;
+use crate::{backend::bgtasks::BgtaskTrigger, stream_id::StreamId};
 
 type StreamerInitFuture = Shared<BoxFuture<'static, Result<StreamerClient, StreamerError>>>;
 
@@ -330,7 +329,7 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        record::{Metered, Record, StreamPosition},
+        record::{Metered, Record, StoredRecord, StreamPosition},
         types::{config::BasinConfig, resources::CreateMode},
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
@@ -374,7 +373,7 @@ mod tests {
         };
 
         let record = Record::try_from_parts(vec![], Bytes::from_static(b"hello")).unwrap();
-        let metered_record: Metered<Record> = record.into();
+        let metered_record: Metered<StoredRecord> = StoredRecord::from(record).into();
 
         let mut wb = WriteBatch::new();
         wb.put(

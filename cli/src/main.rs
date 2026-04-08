@@ -32,9 +32,9 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput, MeteredBytes,
-        Metric, RetentionPolicy, RetryConfig, StreamConfig as SdkStreamConfig, StreamName,
-        TimestampingConfig, TimestampingMode,
+        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
+        EncryptionConfig, MeteredBytes, Metric, RetentionPolicy, RetryConfig,
+        StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig, TimestampingMode,
     },
 };
 use strum::VariantNames;
@@ -363,6 +363,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Append(args) => {
+            let encryption = resolve_encryption(&args.encryption)?;
             let records_in = args
                 .input
                 .reader()
@@ -381,6 +382,7 @@ async fn run() -> Result<(), CliError> {
                 &s2,
                 record_stream,
                 args.uri,
+                encryption.as_ref(),
                 args.fencing_token,
                 args.match_seq_num,
                 *args.linger,
@@ -423,7 +425,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Read(args) => {
-            let mut batches = ops::read(&s2, &args).await?;
+            let encryption = resolve_encryption(&args.encryption)?;
+            let mut batches = ops::read(&s2, &args, encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -485,7 +488,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::Tail(args) => {
-            let mut records = ops::tail(&s2, &args).await?;
+            let encryption = resolve_encryption(&args.encryption)?;
+            let mut records = ops::tail(&s2, &args, encryption.as_ref()).await?;
             let mut writer = args
                 .output
                 .writer()
@@ -794,5 +798,20 @@ fn print_metrics(metrics: &[Metric]) {
                 }
             }
         }
+    }
+}
+
+fn resolve_encryption(args: &cli::EncryptionArgs) -> Result<Option<EncryptionConfig>, CliError> {
+    match (&args.encryption, &args.encryption_file) {
+        (Some(config), _) => Ok(Some(config.clone())),
+        (_, Some(path)) => {
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                CliError::InvalidArgs(miette::miette!("cannot read encryption spec file: {e}"))
+            })?;
+            Ok(Some(contents.trim().parse::<EncryptionConfig>().map_err(
+                |e| CliError::InvalidArgs(miette::miette!("{e}")),
+            )?))
+        }
+        _ => Ok(None),
     }
 }

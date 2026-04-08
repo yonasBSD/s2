@@ -3,7 +3,7 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, FencingToken, StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionConfig, FencingToken, StreamNamePrefix, StreamNameStartAfter,
 };
 
 use crate::{
@@ -464,6 +464,32 @@ pub struct AppendArgs {
     /// How long to wait for more records before flushing a batch.
     #[arg(long, default_value = "5ms")]
     pub linger: humantime::Duration,
+
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct EncryptionArgs {
+    /// Encryption spec. Use `plain` or `<alg>; <base64-key>`.
+    /// Alternatively, set `S2_ENCRYPTION`.
+    #[arg(
+        long,
+        env = "S2_ENCRYPTION",
+        hide_env_values = true,
+        value_name = "SPEC",
+        group = "encryption_source"
+    )]
+    pub encryption: Option<EncryptionConfig>,
+
+    /// Read an encryption spec from file.
+    #[arg(
+        long,
+        conflicts_with = "encryption",
+        value_name = "FILE",
+        group = "encryption_source"
+    )]
+    pub encryption_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -515,6 +541,9 @@ pub struct ReadArgs {
     /// Use "-" to write to stdout.
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
+
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]
@@ -539,6 +568,9 @@ pub struct TailArgs {
     /// Use "-" to write to stdout.
     #[arg(short = 'o', long, value_parser = parse_records_output_source, default_value = "-")]
     pub output: RecordsOut,
+
+    #[command(flatten)]
+    pub encryption: EncryptionArgs,
 }
 
 #[derive(Args, Debug)]

@@ -4607,9 +4607,10 @@ impl App {
                 until: None,
                 format: RecordFormat::default(),
                 output: RecordsOut::Stdout,
+                encryption: Default::default(),
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     while let Some(batch_result) = batch_stream.next().await {
@@ -4679,9 +4680,10 @@ impl App {
                 until: None,
                 format: RecordFormat::default(),
                 output: RecordsOut::Stdout,
+                encryption: Default::default(),
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     while let Some(batch_result) = batch_stream.next().await {
@@ -4842,6 +4844,7 @@ impl App {
                 until,
                 format: record_format,
                 output: output.clone(),
+                encryption: Default::default(),
             };
 
             // Open file writer if output file is specified
@@ -4859,7 +4862,7 @@ impl App {
                 None
             };
 
-            match ops::read(&s2, &args).await {
+            match ops::read(&s2, &args, None).await {
                 Ok(mut batch_stream) => {
                     use futures::StreamExt;
                     use tokio::io::AsyncWriteExt;
