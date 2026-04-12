@@ -74,6 +74,9 @@ pub struct StreamConfigSpec {
     /// Delete-on-empty configuration.
     #[serde(default)]
     pub delete_on_empty: Option<DeleteOnEmptySpec>,
+    /// Encryption configuration.
+    #[serde(default)]
+    pub encryption: Option<EncryptionConfigSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -102,6 +105,47 @@ impl From<StorageClassSpec> for StorageClass {
         match s {
             StorageClassSpec::Standard => StorageClass::Standard,
             StorageClassSpec::Express => StorageClass::Express,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EncryptionModeSpec {
+    Plain,
+    Aegis256,
+    Aes256Gcm,
+}
+
+impl schemars::JsonSchema for EncryptionModeSpec {
+    fn schema_name() -> Cow<'static, str> {
+        "EncryptionModeSpec".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Allowed encryption mode.",
+            "enum": ["plain", "aegis-256", "aes-256-gcm"]
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptionConfigSpec {
+    /// Allowed encryption modes.
+    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
+    #[serde(default)]
+    pub allowed_modes: Vec<EncryptionModeSpec>,
+}
+
+impl From<EncryptionModeSpec> for s2_common::encryption::EncryptionMode {
+    fn from(m: EncryptionModeSpec) -> Self {
+        match m {
+            EncryptionModeSpec::Plain => Self::Plain,
+            EncryptionModeSpec::Aegis256 => Self::Aegis256,
+            EncryptionModeSpec::Aes256Gcm => Self::Aes256Gcm,
         }
     }
 }
@@ -290,6 +334,19 @@ impl From<StreamConfigSpec> for StreamReconfiguration {
                             .min_age
                             .map(|h| Some(h.0))
                             .map_or(Maybe::Unspecified, Maybe::Specified),
+                    })
+                })
+                .map_or(Maybe::Unspecified, Maybe::Specified),
+            encryption: s
+                .encryption
+                .map(|enc| {
+                    Some(s2_common::types::config::EncryptionReconfiguration {
+                        allowed_modes: Maybe::Specified(
+                            enc.allowed_modes
+                                .into_iter()
+                                .map(s2_common::encryption::EncryptionMode::from)
+                                .collect(),
+                        ),
                     })
                 })
                 .map_or(Maybe::Unspecified, Maybe::Specified),
@@ -633,6 +690,7 @@ mod tests {
             retention_policy: Some(RetentionPolicySpec(RetentionPolicy::Infinite())),
             timestamping: None,
             delete_on_empty: None,
+            encryption: None,
         };
         let reconfig = StreamReconfiguration::from(spec);
         assert!(matches!(
@@ -645,5 +703,30 @@ mod tests {
         ));
         assert!(matches!(reconfig.timestamping, Maybe::Unspecified));
         assert!(matches!(reconfig.delete_on_empty, Maybe::Unspecified));
+    }
+
+    #[test]
+    fn stream_config_empty_encryption_modes_clear_override() {
+        let spec = StreamConfigSpec {
+            storage_class: None,
+            retention_policy: None,
+            timestamping: None,
+            delete_on_empty: None,
+            encryption: Some(EncryptionConfigSpec {
+                allowed_modes: vec![],
+            }),
+        };
+
+        let reconfig = StreamReconfiguration::from(spec);
+
+        match reconfig.encryption {
+            Maybe::Specified(Some(encryption)) => {
+                assert!(matches!(
+                    encryption.allowed_modes,
+                    Maybe::Specified(modes) if modes.is_empty()
+                ));
+            }
+            other => panic!("expected explicit encryption reconfiguration, got {other:?}"),
+        }
     }
 }

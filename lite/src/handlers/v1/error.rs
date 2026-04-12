@@ -163,6 +163,7 @@ impl ServiceError {
                 CreateStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
                 }
+                CreateStreamError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -192,11 +193,17 @@ impl ServiceError {
                 ReconfigureStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
+                ReconfigureStreamError::BasinNotFound(e) => {
+                    standard(ErrorCode::BasinNotFound, e.to_string())
+                }
                 ReconfigureStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
                 ReconfigureStreamError::StreamDeletionPending(e) => {
                     standard(ErrorCode::StreamDeletionPending, e.to_string())
+                }
+                ReconfigureStreamError::Validation(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
                 }
             },
             ServiceError::CheckTail(e) => match e {
@@ -252,6 +259,9 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
+                AppendError::EncryptionModeNotAllowed(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),

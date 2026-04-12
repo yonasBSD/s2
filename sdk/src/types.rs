@@ -691,6 +691,44 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
     }
 }
 
+/// Encryption configuration for a stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EncryptionConfig {
+    /// Allowed encryption modes for the stream.
+    ///
+    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
+    pub allowed_modes: Vec<EncryptionMode>,
+}
+
+impl EncryptionConfig {
+    /// Create a new [`EncryptionConfig`] with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the allowed encryption modes.
+    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
+        Self { allowed_modes }
+    }
+}
+
+impl From<api::config::EncryptionConfig> for EncryptionConfig {
+    fn from(value: api::config::EncryptionConfig) -> Self {
+        Self {
+            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<EncryptionConfig> for api::config::EncryptionConfig {
+    fn from(value: EncryptionConfig) -> Self {
+        Self {
+            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for a stream.
@@ -711,6 +749,10 @@ pub struct StreamConfig {
     ///
     /// See [`DeleteOnEmptyConfig`] for defaults.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    /// Encryption configuration.
+    ///
+    /// See [`EncryptionConfig`] for defaults.
+    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -750,6 +792,14 @@ impl StreamConfig {
             ..self
         }
     }
+
+    /// Set the encryption configuration.
+    pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
+        Self {
+            encryption: Some(encryption),
+            ..self
+        }
+    }
 }
 
 impl From<api::config::StreamConfig> for StreamConfig {
@@ -759,6 +809,7 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
+            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -770,6 +821,7 @@ impl From<StreamConfig> for api::config::StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
+            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -1254,6 +1306,40 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
     }
 }
 
+/// Encryption reconfiguration for a stream.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct EncryptionReconfiguration {
+    /// Override for the existing [`allowed_modes`](EncryptionConfig::allowed_modes).
+    ///
+    /// Specify an empty list to reset to defaults.
+    pub allowed_modes: Maybe<Vec<EncryptionMode>>,
+}
+
+impl EncryptionReconfiguration {
+    /// Create a new [`EncryptionReconfiguration`] with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the allowed encryption modes.
+    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
+        Self {
+            allowed_modes: Maybe::Specified(allowed_modes),
+        }
+    }
+}
+
+impl From<EncryptionReconfiguration> for api::config::EncryptionReconfiguration {
+    fn from(value: EncryptionReconfiguration) -> Self {
+        Self {
+            allowed_modes: value
+                .allowed_modes
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 /// Reconfiguration for [`StreamConfig`].
@@ -1266,6 +1352,8 @@ pub struct StreamReconfiguration {
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     /// Override for the existing [`delete_on_empty`](StreamConfig::delete_on_empty).
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
+    /// Override for the existing [`encryption`](StreamConfig::encryption).
+    pub encryption: Maybe<Option<EncryptionReconfiguration>>,
 }
 
 impl StreamReconfiguration {
@@ -1305,6 +1393,14 @@ impl StreamReconfiguration {
             ..self
         }
     }
+
+    /// Set the encryption reconfiguration.
+    pub fn with_encryption(self, encryption: EncryptionReconfiguration) -> Self {
+        Self {
+            encryption: Maybe::Specified(Some(encryption)),
+            ..self
+        }
+    }
 }
 
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
@@ -1314,6 +1410,7 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
+            encryption: value.encryption.map(|m| m.map(Into::into)),
         }
     }
 }

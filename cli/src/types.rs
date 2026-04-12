@@ -4,7 +4,7 @@ use clap::{Args, Parser, ValueEnum};
 use s2_sdk::{
     self as sdk,
     types::{
-        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, StreamName,
+        AccessTokenId, AccessTokenIdPrefix, BasinName, BasinNamePrefix, EncryptionMode, StreamName,
         StreamNamePrefix, TimeseriesInterval,
     },
 };
@@ -152,6 +152,9 @@ pub struct StreamConfig {
     #[clap(flatten)]
     /// Delete-on-empty configuration.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    #[clap(flatten)]
+    /// Encryption configuration.
+    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -161,11 +164,13 @@ impl StreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
+            encryption,
         } = self;
         storage_class.is_none()
             && retention_policy.is_none()
             && timestamping.is_none()
             && delete_on_empty.is_none()
+            && encryption.is_none()
     }
 }
 
@@ -251,6 +256,35 @@ impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     }
 }
 
+#[derive(Parser, Debug, Clone, Serialize)]
+pub struct EncryptionConfig {
+    #[arg(long, value_delimiter = ',')]
+    /// Allowed encryption modes (comma-separated). If no default is configured, only plaintext is
+    /// allowed.
+    pub encryption_allowed_modes: Vec<EncryptionMode>,
+}
+
+impl From<EncryptionConfig> for sdk::types::EncryptionConfig {
+    fn from(value: EncryptionConfig) -> Self {
+        sdk::types::EncryptionConfig::new().with_allowed_modes(value.encryption_allowed_modes)
+    }
+}
+
+impl From<sdk::types::EncryptionConfig> for EncryptionConfig {
+    fn from(value: sdk::types::EncryptionConfig) -> Self {
+        Self {
+            encryption_allowed_modes: value.allowed_modes,
+        }
+    }
+}
+
+impl From<EncryptionConfig> for sdk::types::EncryptionReconfiguration {
+    fn from(value: EncryptionConfig) -> Self {
+        sdk::types::EncryptionReconfiguration::new()
+            .with_allowed_modes(value.encryption_allowed_modes)
+    }
+}
+
 impl From<BasinConfig> for sdk::types::BasinConfig {
     fn from(config: BasinConfig) -> Self {
         sdk::types::BasinConfig::new()
@@ -274,6 +308,9 @@ impl From<StreamConfig> for sdk::types::StreamConfig {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             stream_config = stream_config.with_delete_on_empty(delete_on_empty.into());
+        }
+        if let Some(encryption) = config.encryption {
+            stream_config = stream_config.with_encryption(encryption.into());
         }
         stream_config
     }
@@ -379,6 +416,7 @@ impl From<sdk::types::StreamConfig> for StreamConfig {
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
+            encryption: config.encryption.map(Into::into),
         }
     }
 }
@@ -398,6 +436,9 @@ impl From<StreamConfig> for sdk::types::StreamReconfiguration {
         }
         if let Some(delete_on_empty) = config.delete_on_empty {
             reconfig = reconfig.with_delete_on_empty(delete_on_empty.into());
+        }
+        if let Some(encryption) = config.encryption {
+            reconfig = reconfig.with_encryption(encryption.into());
         }
         reconfig
     }

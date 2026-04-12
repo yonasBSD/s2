@@ -18,8 +18,13 @@ use s2_lite::backend::{
 use super::common::*;
 
 async fn assert_append_session_roundtrip(test_suffix: &str, encryption: &EncryptionSpec) {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+    let (backend, basin_name, stream_name) = setup_backend_with_basin_and_stream(
+        test_suffix,
+        "stream",
+        all_encryption_modes_basin_config(),
+        all_encryption_modes_stream_config(),
+    )
+    .await;
 
     let expected_bodies = vec![
         b"batch 1".to_vec(),
@@ -156,8 +161,17 @@ async fn assert_fencing_command_controls_stream_state(
     encryption: Option<EncryptionSpec>,
     bootstrap: FencingBootstrap,
 ) {
-    let (backend, basin_name, stream_name) =
-        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await;
+    let (backend, basin_name, stream_name) = if encryption.is_some() {
+        setup_backend_with_basin_and_stream(
+            test_suffix,
+            "stream",
+            aegis_only_encryption_basin_config(),
+            aegis_only_encryption_stream_config(),
+        )
+        .await
+    } else {
+        setup_backend_with_stream(test_suffix, "stream", OptionalStreamConfig::default()).await
+    };
 
     let encryption = encryption.as_ref();
     let matching_token = FencingToken::default();
@@ -245,12 +259,12 @@ async fn test_append_multiple_records() {
 #[case::plaintext_seeded("append-fencing", None, FencingBootstrap::SeedWithData)]
 #[case::encrypted_seeded(
     "append-fencing-encrypted",
-    Some(aegis256_encryption()),
+    Some(aegis256_encryption_spec()),
     FencingBootstrap::SeedWithData
 )]
 #[case::encrypted_command_first(
     "fence-enc-first",
-    Some(aegis256_encryption()),
+    Some(aegis256_encryption_spec()),
     FencingBootstrap::CommandFirst
 )]
 #[tokio::test]
@@ -377,7 +391,7 @@ async fn test_append_with_seq_num_mismatch() {
 
 #[rstest]
 #[case::plaintext("append-session-basic", EncryptionSpec::Plain)]
-#[case::encrypted("appsess-enc", aegis256_encryption())]
+#[case::encrypted("appsess-enc", aegis256_encryption_spec())]
 #[tokio::test]
 async fn test_append_session_roundtrip(
     #[case] test_suffix: &str,

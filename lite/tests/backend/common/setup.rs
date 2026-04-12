@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use s2_common::{
-    encryption::EncryptionSpec,
+    encryption::{EncryptionMode, EncryptionSpec},
     record::{CommandRecord, FencingToken, Metered, Record, Timestamp},
     types::{
         basin::BasinName,
@@ -46,7 +46,48 @@ pub fn test_stream_name(suffix: &str) -> StreamName {
     format!("test-stream-{}", suffix).parse().unwrap()
 }
 
-pub fn aegis256_encryption() -> EncryptionSpec {
+pub fn all_encryption_modes_stream_config() -> OptionalStreamConfig {
+    use s2_common::types::config::OptionalEncryptionConfig;
+    OptionalStreamConfig {
+        encryption: OptionalEncryptionConfig {
+            allowed_modes: Some(
+                [
+                    EncryptionMode::Plain,
+                    EncryptionMode::Aegis256,
+                    EncryptionMode::Aes256Gcm,
+                ]
+                .into(),
+            ),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn all_encryption_modes_basin_config() -> BasinConfig {
+    BasinConfig {
+        default_stream_config: all_encryption_modes_stream_config(),
+        ..Default::default()
+    }
+}
+
+pub fn aegis_only_encryption_stream_config() -> OptionalStreamConfig {
+    use s2_common::types::config::OptionalEncryptionConfig;
+    OptionalStreamConfig {
+        encryption: OptionalEncryptionConfig {
+            allowed_modes: Some([EncryptionMode::Aegis256].into()),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn aegis_only_encryption_basin_config() -> BasinConfig {
+    BasinConfig {
+        default_stream_config: aegis_only_encryption_stream_config(),
+        ..Default::default()
+    }
+}
+
+pub fn aegis256_encryption_spec() -> EncryptionSpec {
     EncryptionSpec::aegis256([0x42; 32])
 }
 
@@ -125,8 +166,23 @@ pub async fn setup_backend_with_stream(
     stream_suffix: &str,
     stream_config: OptionalStreamConfig,
 ) -> (Backend, BasinName, StreamName) {
+    setup_backend_with_basin_and_stream(
+        basin_suffix,
+        stream_suffix,
+        BasinConfig::default(),
+        stream_config,
+    )
+    .await
+}
+
+pub async fn setup_backend_with_basin_and_stream(
+    basin_suffix: &str,
+    stream_suffix: &str,
+    basin_config: BasinConfig,
+    stream_config: OptionalStreamConfig,
+) -> (Backend, BasinName, StreamName) {
     let backend = create_backend().await;
-    let basin_name = create_test_basin(&backend, basin_suffix, BasinConfig::default()).await;
+    let basin_name = create_test_basin(&backend, basin_suffix, basin_config).await;
     let stream_name = create_test_stream(&backend, &basin_name, stream_suffix, stream_config).await;
     (backend, basin_name, stream_name)
 }
