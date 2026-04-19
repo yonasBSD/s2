@@ -1,7 +1,8 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    record::{FencingToken, SeqNum, StreamPosition},
+    encryption::{EncryptionAlgorithm, EncryptionSpecResolutionError},
+    record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
 
@@ -77,15 +78,18 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("encryption mode '{0}' is not allowed on this stream")]
-pub struct EncryptionModeNotAllowedError(pub s2_common::encryption::EncryptionMode);
+#[error("record encryption algorithm mismatch")]
+pub struct EncryptionAlgorithmMismatchError {
+    pub expected: Option<EncryptionAlgorithm>,
+    pub actual: Option<EncryptionAlgorithm>,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("transaction conflict occurred – this is usually retriable")]
 pub struct TransactionConflictError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub(super) enum StreamerError {
+pub enum StreamerError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -107,7 +111,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -143,6 +147,8 @@ pub enum AppendError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
@@ -161,7 +167,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionModeNotAllowed(#[from] EncryptionModeNotAllowedError),
+    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -174,8 +180,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionModeNotAllowed(e) => {
-                AppendError::EncryptionModeNotAllowed(e)
+            AppendErrorInternal::EncryptionAlgorithmMismatch(e) => {
+                AppendError::EncryptionAlgorithmMismatch(e)
             }
         }
     }
@@ -222,6 +228,10 @@ impl From<StreamerError> for AppendError {
 pub enum ReadError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    EncryptionSpecResolution(#[from] EncryptionSpecResolutionError),
+    #[error(transparent)]
+    RecordDecryption(#[from] RecordDecryptionError),
     #[error(transparent)]
     TransactionConflict(#[from] TransactionConflictError),
     #[error(transparent)]

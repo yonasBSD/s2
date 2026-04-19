@@ -3,7 +3,8 @@ use std::{num::NonZeroU64, path::PathBuf};
 use clap::{Args, Parser, Subcommand, builder::styling};
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinNamePrefix,
-    BasinNameStartAfter, EncryptionSpec, FencingToken, StreamNamePrefix, StreamNameStartAfter,
+    BasinNameStartAfter, EncryptionAlgorithm, EncryptionKey, FencingToken, StreamNamePrefix,
+    StreamNameStartAfter,
 };
 
 use crate::{
@@ -273,6 +274,10 @@ pub struct ReconfigureBasinArgs {
     /// Name of the basin to reconfigure.
     pub basin: S2BasinUri,
 
+    /// Encryption algorithm to apply to newly created streams in this basin.
+    #[arg(long)]
+    pub stream_cipher: Option<EncryptionAlgorithm>,
+
     /// Create stream on append with basin defaults if it doesn't exist.
     #[arg(long)]
     pub create_stream_on_append: Option<bool>,
@@ -466,30 +471,31 @@ pub struct AppendArgs {
     pub linger: humantime::Duration,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct EncryptionArgs {
-    /// Encryption spec. Use `plain` or `<alg>; <base64-key>`.
-    /// Alternatively, set `S2_ENCRYPTION`.
+pub struct EncryptionKeyArgs {
+    /// Base64-encoded encryption key material.
+    /// Alternatively, set `S2_ENCRYPTION_KEY`.
     #[arg(
-        long,
-        env = "S2_ENCRYPTION",
+        short = 'k',
+        long = "encryption-key",
+        env = "S2_ENCRYPTION_KEY",
         hide_env_values = true,
-        value_name = "SPEC",
-        group = "encryption_source"
+        value_name = "KEY",
+        group = "encryption_key_source"
     )]
-    pub encryption: Option<EncryptionSpec>,
+    pub key: Option<EncryptionKey>,
 
-    /// Read an encryption spec from file.
+    /// Read base64-encoded encryption key material from file.
     #[arg(
-        long,
-        conflicts_with = "encryption",
+        long = "encryption-key-file",
+        conflicts_with = "key",
         value_name = "FILE",
-        group = "encryption_source"
+        group = "encryption_key_source"
     )]
-    pub encryption_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -543,7 +549,7 @@ pub struct ReadArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]
@@ -570,7 +576,7 @@ pub struct TailArgs {
     pub output: RecordsOut,
 
     #[command(flatten)]
-    pub encryption: EncryptionArgs,
+    pub encryption_key: EncryptionKeyArgs,
 }
 
 #[derive(Args, Debug)]

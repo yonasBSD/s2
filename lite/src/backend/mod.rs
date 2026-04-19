@@ -1,3 +1,5 @@
+use s2_common::encryption::EncryptionSpec;
+
 pub mod error;
 
 mod basins;
@@ -15,6 +17,13 @@ mod kv;
 pub use core::Backend;
 
 pub use crate::stream_id::StreamId;
+
+#[derive(Clone)]
+pub struct StreamHandle {
+    db: slatedb::Db,
+    client: streamer::StreamerClient,
+    encryption: EncryptionSpec,
+}
 
 pub const FOLLOWER_MAX_LAG: usize = 25;
 

@@ -8,21 +8,19 @@ use std::{
     time::Duration,
 };
 
-use enumset::EnumSet;
 use futures::{
     FutureExt as _,
     future::{BoxFuture, OptionFuture},
 };
 use s2_common::{
-    encryption::EncryptionMode,
+    encryption::EncryptionAlgorithm,
     record::{
         CommandRecord, FencingToken, Metered, MeteredSize, NonZeroSeqNum, Record, SeqNum,
         StoredRecord, StoredSequencedRecord, StreamPosition, Timestamp,
     },
     types::{
         config::{
-            DEFAULT_ALLOWED_ENCRYPTION_MODES, OptionalStreamConfig, OptionalTimestampingConfig,
-            RetentionPolicy, TimestampingMode,
+            OptionalStreamConfig, OptionalTimestampingConfig, RetentionPolicy, TimestampingMode,
         },
         stream::{
             AppendAck, StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch,
@@ -46,7 +44,7 @@ use crate::{
         durability_notifier::DurabilityNotifier,
         error::{
             AppendConditionFailedError, AppendErrorInternal, AppendTimestampRequiredError,
-            DeleteStreamError, EncryptionModeNotAllowedError, RequestDroppedError,
+            DeleteStreamError, EncryptionAlgorithmMismatchError, RequestDroppedError,
             StreamerMissingInActionError,
         },
         kv,
@@ -99,6 +97,7 @@ pub(super) struct Spawner {
     pub db: slatedb::Db,
     pub stream_id: StreamId,
     pub config: OptionalStreamConfig,
+    pub cipher: Option<EncryptionAlgorithm>,
     pub tail_pos: StreamPosition,
     pub fencing_token: FencingToken,
     pub trim_point: RangeTo<SeqNum>,
@@ -113,6 +112,7 @@ impl Spawner {
             db,
             stream_id,
             config,
+            cipher,
             tail_pos,
             fencing_token,
             trim_point,
@@ -127,6 +127,7 @@ impl Spawner {
             stream_id,
             msg_tx: msg_tx.clone(),
             config,
+            cipher,
             fencing_token: CommandState {
                 state: fencing_token,
                 applied_point: ..tail_pos.seq_num,
@@ -157,6 +158,7 @@ impl Spawner {
         StreamerClient {
             id,
             stream_id,
+            cipher,
             msg_tx,
             append_inflight_bytes: append_inflight_bytes_sema,
         }
@@ -186,6 +188,7 @@ struct Streamer {
     stream_id: StreamId,
     msg_tx: mpsc::UnboundedSender<Message>,
     config: OptionalStreamConfig,
+    cipher: Option<EncryptionAlgorithm>,
     fencing_token: CommandState<FencingToken>,
     trim_point: CommandState<RangeTo<SeqNum>>,
     last_doe_deadline_at: Option<Instant>,
@@ -234,17 +237,12 @@ impl Streamer {
                 match_seq_num,
             })?;
         }
-        let allowed_encryption_modes = if self.config.encryption.allowed_modes.is_empty() {
-            DEFAULT_ALLOWED_ENCRYPTION_MODES
-        } else {
-            self.config.encryption.allowed_modes
-        };
         sequenced_records(
             records,
             first_seq_num,
             next_assignable_pos.timestamp,
             &self.config.timestamping,
-            allowed_encryption_modes,
+            self.cipher,
         )
     }
 
@@ -539,6 +537,7 @@ impl Drop for FollowGuard {
 pub(super) struct StreamerClient {
     id: StreamerId,
     stream_id: StreamId,
+    cipher: Option<EncryptionAlgorithm>,
     msg_tx: mpsc::UnboundedSender<Message>,
     append_inflight_bytes: Arc<Semaphore>,
 }
@@ -554,6 +553,10 @@ impl StreamerClient {
 
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
+    }
+
+    pub fn cipher(&self) -> Option<EncryptionAlgorithm> {
+        self.cipher
     }
 
     pub async fn check_tail(&self) -> Result<StreamPosition, StreamerMissingInActionError> {
@@ -636,7 +639,7 @@ impl StreamerClient {
                 }
                 AppendErrorInternal::ConditionFailed(_) => unreachable!("unconditional write"),
                 AppendErrorInternal::TimestampMissing(_) => unreachable!("Timestamp::MAX used"),
-                AppendErrorInternal::EncryptionModeNotAllowed(_) => {
+                AppendErrorInternal::EncryptionAlgorithmMismatch(_) => {
                     unreachable!("terminal append is plaintext command record")
                 }
             }),
@@ -720,7 +723,7 @@ fn sequenced_records(
     first_seq_num: SeqNum,
     prev_max_timestamp: Timestamp,
     config: &OptionalTimestampingConfig,
-    allowed_encryption_modes: EnumSet<EncryptionMode>,
+    expected_encryption_algorithm: Option<EncryptionAlgorithm>,
 ) -> Result<Vec<Metered<StoredSequencedRecord>>, AppendErrorInternal> {
     let mode = config.mode.unwrap_or_default();
     let uncapped = config.uncapped.unwrap_or_default();
@@ -735,9 +738,11 @@ fn sequenced_records(
         match record.as_ref().into_inner() {
             StoredRecord::Plaintext(Record::Command(_)) => {}
             sr @ StoredRecord::Plaintext(_) | sr @ StoredRecord::Encrypted { .. } => {
-                let mode = sr.encryption_mode();
-                if !allowed_encryption_modes.contains(mode) {
-                    Err(EncryptionModeNotAllowedError(mode))?;
+                if expected_encryption_algorithm != sr.encryption_algorithm() {
+                    Err(EncryptionAlgorithmMismatchError {
+                        expected: expected_encryption_algorithm,
+                        actual: sr.encryption_algorithm(),
+                    })?;
                 }
             }
         }
@@ -829,7 +834,7 @@ mod tests {
 
     use bytes::Bytes;
     use s2_common::{
-        encryption::{EncryptionMode, EncryptionSpec},
+        encryption::{EncryptionAlgorithm, EncryptionSpec},
         record::{EnvelopeRecord, Metered, Record, StoredRecord},
         types::stream::{
             StoredAppendInput, StoredAppendRecord, StoredAppendRecordBatch, StoredAppendRecordParts,
@@ -881,8 +886,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -906,8 +910,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().seq_num, 100);
@@ -927,7 +930,7 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let result = sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES);
+        let result = sequenced_records(records, 100, 0, &config, None);
 
         assert!(matches!(
             result,
@@ -949,8 +952,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 900);
@@ -972,8 +974,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result[0].position().timestamp >= now);
@@ -995,8 +996,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1018,14 +1018,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result = sequenced_records(
-            records,
-            100,
-            1000,
-            &config,
-            DEFAULT_ALLOWED_ENCRYPTION_MODES,
-        )
-        .unwrap();
+        let result = sequenced_records(records, 100, 1000, &config, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].position().timestamp, 1000);
@@ -1046,8 +1039,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].position().timestamp <= now + 100);
@@ -1067,8 +1059,7 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let result =
-            sequenced_records(records, 100, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 100, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().timestamp, future);
@@ -1086,8 +1077,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let result =
-            sequenced_records(records, 42, 0, &config, DEFAULT_ALLOWED_ENCRYPTION_MODES).unwrap();
+        let result = sequenced_records(records, 42, 0, &config, None).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].position().seq_num, 42);
@@ -1098,14 +1088,15 @@ mod tests {
     #[test]
     fn sequenced_records_skip_encryption_check_for_command_records() {
         let config = OptionalTimestampingConfig::default();
-        let allowed_modes = [EncryptionMode::Aegis256].into();
+        let expected_encryption_algorithm = Some(EncryptionAlgorithm::Aegis256);
 
         let records: StoredAppendRecordBatch =
             vec![test_command_record(CommandRecord::Trim(42), None)]
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, allowed_modes).unwrap();
+        let result =
+            sequenced_records(records, 42, 0, &config, expected_encryption_algorithm).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].position().seq_num, 42);
@@ -1114,19 +1105,22 @@ mod tests {
     #[test]
     fn sequenced_records_reject_disallowed_encrypted_envelope_records() {
         let config = OptionalTimestampingConfig::default();
-        let allowed_modes = [EncryptionMode::Aes256Gcm].into();
+        let expected_encryption_algorithm = Some(EncryptionAlgorithm::Aes256Gcm);
 
         let records: StoredAppendRecordBatch =
             vec![test_encrypted_record(vec![1, 2, 3].into(), None)]
                 .try_into()
                 .unwrap();
 
-        let result = sequenced_records(records, 42, 0, &config, allowed_modes);
+        let result = sequenced_records(records, 42, 0, &config, expected_encryption_algorithm);
 
         assert!(matches!(
             result,
-            Err(AppendErrorInternal::EncryptionModeNotAllowed(
-                EncryptionModeNotAllowedError(EncryptionMode::Aegis256)
+            Err(AppendErrorInternal::EncryptionAlgorithmMismatch(
+                EncryptionAlgorithmMismatchError {
+                    expected: Some(EncryptionAlgorithm::Aes256Gcm),
+                    actual: Some(EncryptionAlgorithm::Aegis256),
+                }
             ))
         ));
     }
@@ -1166,6 +1160,7 @@ mod tests {
             stream_id: [3u8; StreamId::LEN].into(),
             msg_tx,
             config: OptionalStreamConfig::default(),
+            cipher: None,
             fencing_token: CommandState {
                 state: FencingToken::default(),
                 applied_point: ..SeqNum::MIN,

@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use s2_common::{
-    encryption::EncryptionMode,
+    encryption::EncryptionAlgorithm,
     maybe::Maybe,
     types::{
         config::{
-            BasinConfig, EncryptionReconfiguration, OptionalEncryptionConfig, OptionalStreamConfig,
-            OptionalTimestampingConfig, RetentionPolicy, StorageClass, StreamReconfiguration,
-            TimestampingMode, TimestampingReconfiguration,
+            BasinConfig, BasinReconfiguration, OptionalStreamConfig, OptionalTimestampingConfig,
+            RetentionPolicy, StorageClass, StreamReconfiguration, TimestampingMode,
+            TimestampingReconfiguration,
         },
         resources::{CreateMode, ListItemsRequestParts, RequestToken},
         stream::{
@@ -76,7 +76,7 @@ async fn test_create_stream_honors_basin_defaults() {
 }
 
 #[tokio::test]
-async fn test_create_stream_defaults_encryption_to_plaintext_only() {
+async fn test_create_stream_defaults_to_no_encryption_algorithm() {
     let backend = create_backend().await;
     let basin_name =
         create_test_basin(&backend, "stream-default-enc", BasinConfig::default()).await;
@@ -88,129 +88,105 @@ async fn test_create_stream_defaults_encryption_to_plaintext_only() {
     )
     .await;
 
-    let config = backend
-        .get_stream_config(basin_name, stream_name)
+    let page = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
         .await
-        .expect("Failed to fetch stream config");
-
-    let expected_modes: enumset::EnumSet<EncryptionMode> = [EncryptionMode::Plain].into();
-    assert_eq!(config.encryption.allowed_modes, expected_modes);
+        .expect("Failed to list streams");
+    let info = page
+        .values
+        .iter()
+        .find(|info| info.name == stream_name)
+        .expect("stream info should be present");
+    assert_eq!(info.cipher, None);
 }
 
 #[tokio::test]
-async fn test_create_stream_rejects_encryption_modes_outside_basin_defaults() {
-    let backend = create_backend().await;
-    let basin_name =
-        create_test_basin(&backend, "stream-encryption-reject", BasinConfig::default()).await;
-    let stream_name = test_stream_name("stream-encryption-reject");
-
-    let result = backend
-        .create_stream(
-            basin_name,
-            stream_name,
-            all_encryption_modes_stream_config(),
-            CreateMode::CreateOnly(None),
-        )
-        .await;
-
-    assert!(matches!(result, Err(CreateStreamError::Validation(_))));
-}
-
-#[tokio::test]
-async fn test_reconfigure_stream_rejects_encryption_modes_outside_basin_defaults() {
+async fn test_create_stream_uses_basin_cipher() {
     let backend = create_backend().await;
     let basin_name = create_test_basin(
         &backend,
-        "stream-reconfigure-encryption-reject",
-        BasinConfig::default(),
+        "stream-cipher",
+        BasinConfig {
+            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
+            ..Default::default()
+        },
     )
     .await;
     let stream_name = create_test_stream(
         &backend,
         &basin_name,
-        "stream-reconfigure-encryption-reject",
+        "stream-cipher",
         OptionalStreamConfig::default(),
     )
     .await;
 
-    let result = backend
-        .reconfigure_stream(
-            basin_name.clone(),
-            stream_name.clone(),
-            StreamReconfiguration {
-                encryption: Maybe::Specified(Some(EncryptionReconfiguration {
-                    allowed_modes: Maybe::Specified([EncryptionMode::Aegis256].into()),
-                })),
-                ..Default::default()
-            },
-        )
+    let page = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
         .await;
-
-    assert!(matches!(result, Err(ReconfigureStreamError::Validation(_))));
+    let page = page.expect("Failed to list streams");
+    let info = page
+        .values
+        .iter()
+        .find(|info| info.name == stream_name)
+        .expect("stream info should be present");
+    assert_eq!(info.cipher, Some(EncryptionAlgorithm::Aegis256));
 }
 
 #[tokio::test]
-async fn test_reconfigure_stream_empty_encryption_uses_basin_defaults() {
+async fn test_existing_stream_keeps_cipher_after_basin_reconfigure() {
     let backend = create_backend().await;
-    let basin_name = test_basin_name("stream-reconfigure-enc");
-    let basin_config = BasinConfig {
-        default_stream_config: OptionalStreamConfig {
-            encryption: OptionalEncryptionConfig {
-                allowed_modes: [EncryptionMode::Plain, EncryptionMode::Aegis256].into(),
-            },
+    let basin_name = create_test_basin(
+        &backend,
+        "stream-basin-cipher-reconfigure",
+        BasinConfig {
+            stream_cipher: Some(EncryptionAlgorithm::Aegis256),
             ..Default::default()
         },
-        ..Default::default()
-    };
+    )
+    .await;
+    let stream_name = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-basin-cipher-reconfigure",
+        OptionalStreamConfig::default(),
+    )
+    .await;
 
     backend
-        .create_basin(
+        .reconfigure_basin(
             basin_name.clone(),
-            basin_config,
-            CreateMode::CreateOnly(None),
-        )
-        .await
-        .expect("Failed to create basin");
-
-    let stream_name = test_stream_name("stream-reconfigure-enc");
-    backend
-        .create_stream(
-            basin_name.clone(),
-            stream_name.clone(),
-            OptionalStreamConfig {
-                encryption: OptionalEncryptionConfig {
-                    allowed_modes: [EncryptionMode::Plain].into(),
-                },
-                ..Default::default()
-            },
-            CreateMode::CreateOnly(None),
-        )
-        .await
-        .expect("Failed to create stream");
-
-    let updated = backend
-        .reconfigure_stream(
-            basin_name.clone(),
-            stream_name.clone(),
-            StreamReconfiguration {
-                encryption: Maybe::Specified(Some(EncryptionReconfiguration {
-                    allowed_modes: Maybe::Specified(Default::default()),
-                })),
+            BasinReconfiguration {
+                stream_cipher: Maybe::Specified(Some(EncryptionAlgorithm::Aes256Gcm)),
                 ..Default::default()
             },
         )
         .await
-        .expect("Failed to reconfigure stream");
+        .expect("Failed to reconfigure basin");
 
-    let expected_modes: enumset::EnumSet<EncryptionMode> =
-        [EncryptionMode::Plain, EncryptionMode::Aegis256].into();
-    assert_eq!(updated.encryption.allowed_modes, expected_modes);
+    let next_stream = create_test_stream(
+        &backend,
+        &basin_name,
+        "stream-basin-cipher-reconfigure-next",
+        OptionalStreamConfig::default(),
+    )
+    .await;
 
-    let fetched = backend
-        .get_stream_config(basin_name, stream_name)
+    let page = backend
+        .list_streams(basin_name, ListStreamsRequest::default())
         .await
-        .expect("Failed to fetch stream config after reconfigure");
-    assert_eq!(fetched.encryption.allowed_modes, expected_modes);
+        .expect("Failed to list streams");
+    let original = page
+        .values
+        .iter()
+        .find(|info| info.name == stream_name)
+        .expect("original stream info should be present");
+    let next = page
+        .values
+        .iter()
+        .find(|info| info.name == next_stream)
+        .expect("new stream info should be present");
+    assert_eq!(original.cipher, Some(EncryptionAlgorithm::Aegis256));
+    assert_eq!(next.cipher, Some(EncryptionAlgorithm::Aes256Gcm));
 }
 
 #[tokio::test]
@@ -390,8 +366,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         .await
         .expect("Failed to reconfigure stream");
 
-    backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
 
@@ -400,7 +375,7 @@ async fn test_reconfigure_stream_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = append(&backend, basin_name, stream_name, input, None).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -433,8 +408,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         .await
         .expect("CreateOrReconfigure should succeed for an existing stream");
 
-    backend
-        .check_tail(basin_name.clone(), stream_name.clone())
+    check_tail(&backend, basin_name.clone(), stream_name.clone())
         .await
         .expect("Failed to check tail");
 
@@ -443,7 +417,7 @@ async fn test_create_stream_create_or_reconfigure_updates_active_streamer() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let result = backend.append(basin_name, stream_name, input).await;
+    let result = append(&backend, basin_name, stream_name, input, None).await;
     assert!(matches!(result, Err(AppendError::TimestampMissing(_))));
 }
 
@@ -543,14 +517,14 @@ async fn test_delete_stream_allows_plaintext_command_records_on_encrypted_only_s
     let basin_name = create_test_basin(
         &backend,
         "stream-delete-encrypted-only",
-        aegis_only_encryption_basin_config(),
+        basin_config_with_stream_cipher(EncryptionAlgorithm::Aegis256),
     )
     .await;
     let stream_name = create_test_stream(
         &backend,
         &basin_name,
         "stream-delete-encrypted-only",
-        aegis_only_encryption_stream_config(),
+        OptionalStreamConfig::default(),
     )
     .await;
 
@@ -599,9 +573,7 @@ async fn test_delete_stream_blocks_data_operations() {
         .await
         .expect("Failed to delete stream");
 
-    let tail = backend
-        .check_tail(basin_name.clone(), stream_name.clone())
-        .await;
+    let tail = check_tail(&backend, basin_name.clone(), stream_name.clone()).await;
     assert!(matches!(
         tail,
         Err(CheckTailError::StreamDeletionPending(_))
@@ -612,9 +584,14 @@ async fn test_delete_stream_blocks_data_operations() {
         match_seq_num: None,
         fencing_token: None,
     };
-    let append_result = backend
-        .append(basin_name.clone(), stream_name.clone(), input)
-        .await;
+    let append_result = append(
+        &backend,
+        basin_name.clone(),
+        stream_name.clone(),
+        input,
+        None,
+    )
+    .await;
     assert!(matches!(
         append_result,
         Err(AppendError::StreamDeletionPending(_))
@@ -625,7 +602,7 @@ async fn test_delete_stream_blocks_data_operations() {
         clamp: false,
     };
     let end = ReadEnd::default();
-    let read_result = backend.read(basin_name, stream_name, start, end).await;
+    let read_result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
     assert!(matches!(
         read_result,
         Err(ReadError::StreamDeletionPending(_))

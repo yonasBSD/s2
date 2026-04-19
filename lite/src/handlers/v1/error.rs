@@ -37,8 +37,6 @@ pub enum ServiceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
     #[error(transparent)]
-    RecordDecryption(#[from] RecordDecryptionError),
-    #[error(transparent)]
     ListBasins(#[from] ListBasinsError),
     #[error(transparent)]
     CreateBasin(#[from] CreateBasinError),
@@ -96,19 +94,6 @@ impl ServiceError {
                 }
             },
             ServiceError::Validation(e) => standard(ErrorCode::Invalid, e.to_string()),
-            ServiceError::RecordDecryption(e) => match e {
-                RecordDecryptionError::ModeMismatch { .. } => {
-                    standard(ErrorCode::Invalid, e.to_string())
-                }
-                RecordDecryptionError::AuthenticationFailed => {
-                    standard(ErrorCode::DecryptionFailed, e.to_string())
-                }
-                RecordDecryptionError::MalformedEncryptedRecord
-                | RecordDecryptionError::MeteredSizeMismatch { .. }
-                | RecordDecryptionError::MalformedDecryptedRecord(_) => {
-                    standard(ErrorCode::Storage, e.to_string())
-                }
-            },
             ServiceError::ListBasins(e) => match e {
                 ListBasinsError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
             },
@@ -231,6 +216,9 @@ impl ServiceError {
             },
             ServiceError::Append(e) => match e {
                 AppendError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                AppendError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
@@ -261,12 +249,28 @@ impl ServiceError {
                     } => v1t::stream::AppendConditionFailed::SeqNumMismatch(*assigned_seq_num),
                 }),
                 AppendError::TimestampMissing(e) => standard(ErrorCode::Invalid, e.to_string()),
-                AppendError::EncryptionModeNotAllowed(e) => {
+                AppendError::EncryptionAlgorithmMismatch(e) => {
                     standard(ErrorCode::Invalid, e.to_string())
                 }
             },
             ServiceError::Read(e) => match e {
                 ReadError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                ReadError::EncryptionSpecResolution(e) => {
+                    standard(ErrorCode::Invalid, e.to_string())
+                }
+                ReadError::RecordDecryption(e) => match e {
+                    RecordDecryptionError::AlgorithmMismatch { .. } => {
+                        standard(ErrorCode::Invalid, e.to_string())
+                    }
+                    RecordDecryptionError::AuthenticationFailed => {
+                        standard(ErrorCode::DecryptionFailed, e.to_string())
+                    }
+                    RecordDecryptionError::MalformedEncryptedRecord
+                    | RecordDecryptionError::MeteredSizeMismatch { .. }
+                    | RecordDecryptionError::MalformedDecryptedRecord(_) => {
+                        standard(ErrorCode::Storage, e.to_string())
+                    }
+                },
                 ReadError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }

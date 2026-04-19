@@ -11,6 +11,7 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use s2_common::{
+    encryption::{EncryptionAlgorithm, EncryptionSpec},
     record::{NonZeroSeqNum, SeqNum, StreamPosition},
     types::{
         basin::BasinName,
@@ -26,6 +27,7 @@ use slatedb::{
 use tokio::sync::{Semaphore, broadcast};
 
 use super::{
+    StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
         BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
@@ -141,6 +143,7 @@ impl Backend {
             db: self.db.clone(),
             stream_id,
             config: meta.config,
+            cipher: meta.cipher,
             tail_pos,
             fencing_token,
             trim_point: ..trim_point.map_or(SeqNum::MIN, |tp| tp.end.get()),
@@ -275,12 +278,13 @@ impl Backend {
         }
     }
 
-    pub(super) async fn streamer_client_with_auto_create<E>(
+    pub(super) async fn stream_handle_with_auto_create<E>(
         &self,
         basin: &BasinName,
         stream: &StreamName,
         should_auto_create: impl FnOnce(&BasinConfig) -> bool,
-    ) -> Result<StreamerClient, E>
+        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
+    ) -> Result<StreamHandle, E>
     where
         E: From<StreamerError>
             + From<StorageError>
@@ -291,7 +295,11 @@ impl Backend {
             + From<StreamNotFoundError>,
     {
         match self.streamer_client(basin, stream).await {
-            Ok(client) => Ok(client),
+            Ok(client) => Ok(StreamHandle {
+                db: self.db.clone(),
+                encryption: resolve_encryption(client.cipher())?,
+                client,
+            }),
             Err(StreamerError::StreamNotFound(e)) => {
                 let config = match self.get_basin_config(basin.clone()).await {
                     Ok(config) => config,
@@ -320,7 +328,13 @@ impl Backend {
                             }
                         }
                     }
-                    Ok(self.streamer_client(basin, stream).await?)
+                    let client = self.streamer_client(basin, stream).await?;
+                    let encryption = resolve_encryption(client.cipher())?;
+                    Ok(StreamHandle {
+                        db: self.db.clone(),
+                        encryption,
+                        client,
+                    })
                 } else {
                     Err(e.into())
                 }
@@ -337,7 +351,10 @@ mod tests {
     use bytes::Bytes;
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
-        types::{config::BasinConfig, resources::CreateMode},
+        types::{
+            config::{BasinConfig, OptionalStreamConfig},
+            resources::CreateMode,
+        },
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
     use time::OffsetDateTime;
@@ -365,6 +382,7 @@ mod tests {
 
         let meta = kv::stream_meta::StreamMeta {
             config: OptionalStreamConfig::default(),
+            cipher: None,
             created_at: OffsetDateTime::now_utc(),
             deleted_at: None,
             creation_idempotency_key: None,

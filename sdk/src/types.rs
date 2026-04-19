@@ -21,10 +21,8 @@ use s2_api::{v1 as api, v1::stream::s2s::CompressionAlgorithm};
 pub use s2_common::caps::RECORD_BATCH_MAX;
 /// Encryption algorithm.
 pub use s2_common::encryption::EncryptionAlgorithm;
-/// Encryption mode, including plaintext.
-pub use s2_common::encryption::EncryptionMode;
-/// Encryption spec for stream operations.
-pub use s2_common::encryption::EncryptionSpec;
+/// Encryption key for stream operations.
+pub use s2_common::encryption::EncryptionKey;
 /// Validation error.
 pub use s2_common::types::ValidationError;
 /// Access token ID.
@@ -691,44 +689,6 @@ impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
     }
 }
 
-/// Encryption configuration for a stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct EncryptionConfig {
-    /// Allowed encryption modes for the stream.
-    ///
-    /// If empty, use defaults. If no default is configured, only plaintext is allowed.
-    pub allowed_modes: Vec<EncryptionMode>,
-}
-
-impl EncryptionConfig {
-    /// Create a new [`EncryptionConfig`] with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the allowed encryption modes.
-    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
-        Self { allowed_modes }
-    }
-}
-
-impl From<api::config::EncryptionConfig> for EncryptionConfig {
-    fn from(value: api::config::EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl From<EncryptionConfig> for api::config::EncryptionConfig {
-    fn from(value: EncryptionConfig) -> Self {
-        Self {
-            allowed_modes: value.allowed_modes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Configuration for a stream.
@@ -749,10 +709,6 @@ pub struct StreamConfig {
     ///
     /// See [`DeleteOnEmptyConfig`] for defaults.
     pub delete_on_empty: Option<DeleteOnEmptyConfig>,
-    /// Encryption configuration.
-    ///
-    /// See [`EncryptionConfig`] for defaults.
-    pub encryption: Option<EncryptionConfig>,
 }
 
 impl StreamConfig {
@@ -792,14 +748,6 @@ impl StreamConfig {
             ..self
         }
     }
-
-    /// Set the encryption configuration.
-    pub fn with_encryption(self, encryption: EncryptionConfig) -> Self {
-        Self {
-            encryption: Some(encryption),
-            ..self
-        }
-    }
 }
 
 impl From<api::config::StreamConfig> for StreamConfig {
@@ -809,7 +757,6 @@ impl From<api::config::StreamConfig> for StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -821,7 +768,6 @@ impl From<StreamConfig> for api::config::StreamConfig {
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
-            encryption: value.encryption.map(Into::into),
         }
     }
 }
@@ -834,6 +780,8 @@ pub struct BasinConfig {
     ///
     /// See [`StreamConfig`] for defaults.
     pub default_stream_config: Option<StreamConfig>,
+    /// Encryption algorithm to apply to newly created streams in the basin.
+    pub stream_cipher: Option<EncryptionAlgorithm>,
     /// Whether to create stream on append if it doesn't exist using default stream configuration.
     ///
     /// Defaults to `false`.
@@ -854,6 +802,14 @@ impl BasinConfig {
     pub fn with_default_stream_config(self, config: StreamConfig) -> Self {
         Self {
             default_stream_config: Some(config),
+            ..self
+        }
+    }
+
+    /// Set the encryption algorithm to apply to newly created streams in the basin.
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
+        Self {
+            stream_cipher: Some(stream_cipher),
             ..self
         }
     }
@@ -880,6 +836,7 @@ impl From<api::config::BasinConfig> for BasinConfig {
     fn from(value: api::config::BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -890,6 +847,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
     fn from(value: BasinConfig) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(Into::into),
+            stream_cipher: value.stream_cipher.map(Into::into),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -1306,40 +1264,6 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
     }
 }
 
-/// Encryption reconfiguration for a stream.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct EncryptionReconfiguration {
-    /// Override for the existing [`allowed_modes`](EncryptionConfig::allowed_modes).
-    ///
-    /// Specify an empty list to reset to defaults.
-    pub allowed_modes: Maybe<Vec<EncryptionMode>>,
-}
-
-impl EncryptionReconfiguration {
-    /// Create a new [`EncryptionReconfiguration`] with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the allowed encryption modes.
-    pub fn with_allowed_modes(self, allowed_modes: Vec<EncryptionMode>) -> Self {
-        Self {
-            allowed_modes: Maybe::Specified(allowed_modes),
-        }
-    }
-}
-
-impl From<EncryptionReconfiguration> for api::config::EncryptionReconfiguration {
-    fn from(value: EncryptionReconfiguration) -> Self {
-        Self {
-            allowed_modes: value
-                .allowed_modes
-                .map(|modes| modes.into_iter().map(Into::into).collect()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 /// Reconfiguration for [`StreamConfig`].
@@ -1352,8 +1276,6 @@ pub struct StreamReconfiguration {
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     /// Override for the existing [`delete_on_empty`](StreamConfig::delete_on_empty).
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
-    /// Override for the existing [`encryption`](StreamConfig::encryption).
-    pub encryption: Maybe<Option<EncryptionReconfiguration>>,
 }
 
 impl StreamReconfiguration {
@@ -1393,14 +1315,6 @@ impl StreamReconfiguration {
             ..self
         }
     }
-
-    /// Set the encryption reconfiguration.
-    pub fn with_encryption(self, encryption: EncryptionReconfiguration) -> Self {
-        Self {
-            encryption: Maybe::Specified(Some(encryption)),
-            ..self
-        }
-    }
 }
 
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
@@ -1410,7 +1324,6 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
             retention_policy: value.retention_policy.map(|m| m.map(Into::into)),
             timestamping: value.timestamping.map(|m| m.map(Into::into)),
             delete_on_empty: value.delete_on_empty.map(|m| m.map(Into::into)),
-            encryption: value.encryption.map(|m| m.map(Into::into)),
         }
     }
 }
@@ -1421,6 +1334,8 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
 pub struct BasinReconfiguration {
     /// Override for the existing [`default_stream_config`](BasinConfig::default_stream_config).
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
+    /// Override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     /// Override for the existing
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
     pub create_stream_on_append: Maybe<bool>,
@@ -1439,6 +1354,14 @@ impl BasinReconfiguration {
     pub fn with_default_stream_config(self, config: StreamReconfiguration) -> Self {
         Self {
             default_stream_config: Maybe::Specified(Some(config)),
+            ..self
+        }
+    }
+
+    /// Set the override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
+    pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
+        Self {
+            stream_cipher: Maybe::Specified(Some(stream_cipher)),
             ..self
         }
     }
@@ -1466,6 +1389,7 @@ impl From<BasinReconfiguration> for api::config::BasinReconfiguration {
     fn from(value: BasinReconfiguration) -> Self {
         Self {
             default_stream_config: value.default_stream_config.map(|m| m.map(Into::into)),
+            stream_cipher: value.stream_cipher.map(|m| m.map(Into::into)),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
@@ -2700,6 +2624,8 @@ pub struct StreamInfo {
     pub created_at: S2DateTime,
     /// Deletion time if the stream is being deleted.
     pub deleted_at: Option<S2DateTime>,
+    /// Encryption algorithm for this stream, if encryption is enabled.
+    pub cipher: Option<EncryptionAlgorithm>,
 }
 
 impl TryFrom<api::stream::StreamInfo> for StreamInfo {
@@ -2710,6 +2636,7 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
             name: value.name,
             created_at: value.created_at.try_into()?,
             deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
+            cipher: value.cipher.map(Into::into),
         })
     }
 }
