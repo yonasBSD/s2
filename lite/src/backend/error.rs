@@ -1,7 +1,7 @@
 use std::{ops::RangeTo, sync::Arc};
 
 use s2_common::{
-    encryption::{EncryptionAlgorithm, EncryptionSpecResolutionError},
+    encryption::EncryptionSpecResolutionError,
     record::{FencingToken, RecordDecryptionError, SeqNum, StreamPosition},
     types::{basin::BasinName, stream::StreamName},
 };
@@ -78,10 +78,12 @@ pub struct RequestDroppedError;
 pub struct AppendTimestampRequiredError;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("record encryption algorithm mismatch")]
-pub struct EncryptionAlgorithmMismatchError {
-    pub expected: Option<EncryptionAlgorithm>,
-    pub actual: Option<EncryptionAlgorithm>,
+#[error(
+    "stream encrypted record limit exceeded: records must be assigned sequence numbers below {limit}; attempted {assigned_seq_num}"
+)]
+pub struct StreamEncryptedRecordLimitExceededError {
+    pub assigned_seq_num: SeqNum,
+    pub limit: SeqNum,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -111,7 +113,7 @@ pub(super) enum AppendErrorInternal {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
+    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -167,7 +169,7 @@ pub enum AppendError {
     #[error(transparent)]
     TimestampMissing(#[from] AppendTimestampRequiredError),
     #[error(transparent)]
-    EncryptionAlgorithmMismatch(#[from] EncryptionAlgorithmMismatchError),
+    StreamEncryptedRecordLimitExceeded(#[from] StreamEncryptedRecordLimitExceededError),
 }
 
 impl From<AppendErrorInternal> for AppendError {
@@ -180,8 +182,8 @@ impl From<AppendErrorInternal> for AppendError {
             AppendErrorInternal::RequestDroppedError(e) => AppendError::RequestDroppedError(e),
             AppendErrorInternal::ConditionFailed(e) => AppendError::ConditionFailed(e),
             AppendErrorInternal::TimestampMissing(e) => AppendError::TimestampMissing(e),
-            AppendErrorInternal::EncryptionAlgorithmMismatch(e) => {
-                AppendError::EncryptionAlgorithmMismatch(e)
+            AppendErrorInternal::StreamEncryptedRecordLimitExceeded(e) => {
+                AppendError::StreamEncryptedRecordLimitExceeded(e)
             }
         }
     }
