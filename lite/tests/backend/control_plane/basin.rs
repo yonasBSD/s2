@@ -1,17 +1,16 @@
 use s2_common::{
     maybe::Maybe,
     types::{
-        basin::{BasinNamePrefix, BasinNameStartAfter, CreateBasinIntent, ListBasinsRequest},
+        basin::{BasinNamePrefix, BasinNameStartAfter, ListBasinsRequest},
         config::{
             BasinConfig, BasinReconfiguration, OptionalStreamConfig, RetentionPolicy, StorageClass,
             StreamReconfiguration, TimestampingMode, TimestampingReconfiguration,
         },
-        resources::{ListItemsRequestParts, RequestToken},
+        resources::{ListItemsRequestParts, ProvisionMode, ProvisionResult, RequestToken},
     },
 };
-use s2_lite::backend::{
-    CreatedOrReconfigured,
-    error::{CreateBasinError, DeleteBasinError, GetBasinConfigError, ReconfigureBasinError},
+use s2_lite::backend::error::{
+    DeleteBasinError, GetBasinConfigError, ProvisionBasinError, ReconfigureBasinError,
 };
 
 use super::common::*;
@@ -28,10 +27,10 @@ async fn test_create_basin_idempotency_respects_request_token() {
     let token1: RequestToken = "token-1".parse().unwrap();
 
     let created = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -39,15 +38,15 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Failed to create basin");
     assert!(matches!(
         created,
-        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+        ProvisionResult::Created(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
     let idempotent = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1.clone()),
             },
         )
@@ -55,44 +54,44 @@ async fn test_create_basin_idempotency_respects_request_token() {
         .expect("Idempotent create should succeed with same request token");
     assert!(matches!(
         idempotent,
-        CreatedOrReconfigured::Created(ref info) if info.deleted_at.is_none()
+        ProvisionResult::Noop(ref info) if info.deleted_at.is_none()
             && info.created_at <= time::OffsetDateTime::now_utc()
     ));
 
     let different_token: RequestToken = "token-2".parse().unwrap();
     let different_token_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(different_token),
             },
         )
         .await;
     assert!(matches!(
         different_token_result,
-        Err(CreateBasinError::BasinAlreadyExists(_))
+        Err(ProvisionBasinError::BasinAlreadyExists(_))
     ));
 
     let mut different_config = config.clone();
     different_config.create_stream_on_append = false;
     let different_config_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name,
-            CreateBasinIntent::CreateOnly {
-                config: different_config,
+            different_config,
+            ProvisionMode::CreateOnly {
                 request_token: Some(token1),
             },
         )
         .await;
     assert!(matches!(
         different_config_result,
-        Err(CreateBasinError::BasinAlreadyExists(_))
+        Err(ProvisionBasinError::BasinAlreadyExists(_))
     ));
 }
 
 #[tokio::test]
-async fn test_create_or_reconfigure_preserves_idempotency_key() {
+async fn test_ensure_preserves_idempotency_key() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("idempotency-key-preserve");
     let config = BasinConfig {
@@ -103,10 +102,10 @@ async fn test_create_or_reconfigure_preserves_idempotency_key() {
     let token: RequestToken = "my-request-token".parse().unwrap();
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
@@ -114,42 +113,37 @@ async fn test_create_or_reconfigure_preserves_idempotency_key() {
         .expect("Failed to create basin");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
         .await
-        .expect("Idempotency should work before CreateOrReconfigure");
+        .expect("Idempotency should work before Ensure");
 
-    let reconfiguration = BasinReconfiguration {
-        create_stream_on_read: Maybe::from(true),
-        ..Default::default()
-    };
+    let mut updated_config = config.clone();
+    updated_config.create_stream_on_read = true;
     backend
-        .create_basin(
-            basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure { reconfiguration },
-        )
+        .provision_basin(basin_name.clone(), updated_config, ProvisionMode::Ensure)
         .await
-        .expect("CreateOrReconfigure should succeed");
+        .expect("Ensure should succeed");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: config.clone(),
+            config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: Some(token.clone()),
             },
         )
         .await
-        .expect("Idempotency should still work after CreateOrReconfigure");
+        .expect("Idempotency should still work after Ensure");
 }
 
 #[tokio::test]
-async fn test_create_basin_create_or_reconfigure_updates_config() {
+async fn test_provision_basin_ensure_updates_config() {
     let backend = create_backend().await;
     let basin_name = test_basin_name("basin-recreate");
     let initial_config = BasinConfig {
@@ -159,10 +153,10 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
     };
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config.clone(),
+            initial_config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -175,14 +169,13 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
     updated_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure {
-                reconfiguration: updated_config.clone().into(),
-            },
+            updated_config.clone(),
+            ProvisionMode::Ensure,
         )
         .await
-        .expect("CreateOrReconfigure should update basin config");
+        .expect("Ensure should update basin config");
 
     let stored_config = backend
         .get_basin_config(basin_name.clone())
@@ -196,10 +189,10 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
     );
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: updated_config,
+            updated_config,
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -208,9 +201,9 @@ async fn test_create_basin_create_or_reconfigure_updates_config() {
 }
 
 #[tokio::test]
-async fn test_create_basin_create_or_reconfigure_preserves_unspecified_config() {
+async fn test_provision_basin_ensure_resets_unspecified_config() {
     let backend = create_backend().await;
-    let basin_name = test_basin_name("basin-reconfigure-preserve");
+    let basin_name = test_basin_name("basin-ensure-reset");
     let initial_config = BasinConfig {
         create_stream_on_append: true,
         create_stream_on_read: false,
@@ -223,10 +216,10 @@ async fn test_create_basin_create_or_reconfigure_preserves_unspecified_config() 
     };
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config,
+            initial_config,
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -234,32 +227,25 @@ async fn test_create_basin_create_or_reconfigure_preserves_unspecified_config() 
         .expect("Failed to create basin");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOrReconfigure {
-                reconfiguration: BasinReconfiguration {
-                    create_stream_on_read: Maybe::from(true),
-                    ..Default::default()
-                },
+            BasinConfig {
+                create_stream_on_read: true,
+                ..Default::default()
             },
+            ProvisionMode::Ensure,
         )
         .await
-        .expect("CreateOrReconfigure should preserve unspecified fields");
+        .expect("Ensure should reset unspecified fields to defaults");
 
     let stored_config = backend
         .get_basin_config(basin_name)
         .await
         .expect("Failed to fetch basin config");
-    assert!(stored_config.create_stream_on_append);
+    assert!(!stored_config.create_stream_on_append);
     assert!(stored_config.create_stream_on_read);
-    assert_eq!(
-        stored_config.default_stream_config.storage_class,
-        Some(StorageClass::Standard)
-    );
-    assert_eq!(
-        stored_config.default_stream_config.retention_policy,
-        Some(RetentionPolicy::Infinite())
-    );
+    assert_eq!(stored_config.default_stream_config.storage_class, None);
+    assert_eq!(stored_config.default_stream_config.retention_policy, None);
 }
 
 #[tokio::test]
@@ -270,10 +256,10 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     initial_config.default_stream_config.storage_class = Some(StorageClass::Standard);
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: initial_config.clone(),
+            initial_config.clone(),
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -344,10 +330,10 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     let basin_name = test_basin_name("basin-delete");
 
     backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: BasinConfig::default(),
+            BasinConfig::default(),
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
@@ -379,17 +365,17 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
     ));
 
     let recreate_result = backend
-        .create_basin(
+        .provision_basin(
             basin_name.clone(),
-            CreateBasinIntent::CreateOnly {
-                config: BasinConfig::default(),
+            BasinConfig::default(),
+            ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
         .await;
     assert!(matches!(
         recreate_result,
-        Err(CreateBasinError::BasinDeletionPending(_))
+        Err(ProvisionBasinError::BasinDeletionPending(_))
     ));
 
     backend

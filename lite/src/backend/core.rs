@@ -12,7 +12,8 @@ use s2_common::{
     types::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
-        stream::{CreateStreamIntent, StreamName},
+        resources::ProvisionMode,
+        stream::StreamName,
     },
 };
 use slatedb::{
@@ -25,7 +26,7 @@ use super::{
     StreamHandle,
     durability_notifier::DurabilityNotifier,
     error::{
-        BasinDeletionPendingError, BasinNotFoundError, CreateStreamError, GetBasinConfigError,
+        BasinDeletionPendingError, BasinNotFoundError, GetBasinConfigError, ProvisionStreamError,
         StorageError, StreamDeletionPendingError, StreamNotFoundError, StreamerError,
         StreamerMissingInActionError, TransactionConflictError,
     },
@@ -324,24 +325,24 @@ impl Backend {
                 };
                 if should_auto_create(&config) {
                     if let Err(e) = self
-                        .create_stream(
+                        .provision_stream(
                             basin.clone(),
                             stream.clone(),
-                            CreateStreamIntent::CreateOnly {
-                                config: OptionalStreamConfig::default(),
+                            OptionalStreamConfig::default(),
+                            ProvisionMode::CreateOnly {
                                 request_token: None,
                             },
                         )
                         .await
                     {
                         match e {
-                            CreateStreamError::Storage(e) => Err(e)?,
-                            CreateStreamError::TransactionConflict(e) => Err(e)?,
-                            CreateStreamError::BasinDeletionPending(e) => Err(e)?,
-                            CreateStreamError::StreamDeletionPending(e) => Err(e)?,
-                            CreateStreamError::BasinNotFound(e) => Err(e)?,
-                            CreateStreamError::StreamAlreadyExists(_) => {}
-                            CreateStreamError::Validation(_) => {
+                            ProvisionStreamError::Storage(e) => Err(e)?,
+                            ProvisionStreamError::TransactionConflict(e) => Err(e)?,
+                            ProvisionStreamError::BasinDeletionPending(e) => Err(e)?,
+                            ProvisionStreamError::StreamDeletionPending(e) => Err(e)?,
+                            ProvisionStreamError::BasinNotFound(e) => Err(e)?,
+                            ProvisionStreamError::StreamAlreadyExists(_) => {}
+                            ProvisionStreamError::Validation(_) => {
                                 unreachable!("auto-create uses default config")
                             }
                         }
@@ -370,8 +371,8 @@ mod tests {
     use s2_common::{
         record::{Metered, Record, StoredRecord, StreamPosition},
         types::{
-            basin::CreateBasinIntent,
             config::{BasinConfig, OptionalStreamConfig},
+            resources::ProvisionMode,
         },
     };
     use slatedb::{WriteBatch, config::WriteOptions, object_store};
@@ -482,21 +483,21 @@ mod tests {
         let stream = StreamName::from_str("stream3").unwrap();
 
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: BasinConfig::default(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
             .await
             .unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: OptionalStreamConfig::default(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )

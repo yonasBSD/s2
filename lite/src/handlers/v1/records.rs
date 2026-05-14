@@ -468,12 +468,12 @@ mod tests {
         read_extent::{ReadLimit, ReadUntil},
         record::{EnvelopeRecord, Metered, Record},
         types::{
-            basin::{BASIN_HEADER, BasinName, CreateBasinIntent},
+            basin::{BASIN_HEADER, BasinName},
             config::{BasinConfig, OptionalStreamConfig},
+            resources::ProvisionMode,
             stream::{
                 AppendInput, AppendRecord, AppendRecordBatch, AppendRecordParts,
-                CreateStreamIntent, ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput,
-                ReadStart, StreamName,
+                ListStreamsRequest, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName,
             },
         },
     };
@@ -518,10 +518,10 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -529,11 +529,11 @@ mod tests {
             .expect("create basin");
         let stream: StreamName = format!("test-stream-{test_suffix}").parse().unwrap();
         backend
-            .create_stream(
+            .provision_stream(
                 basin.clone(),
                 stream.clone(),
-                CreateStreamIntent::CreateOnly {
-                    config: stream_config,
+                stream_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
@@ -550,10 +550,10 @@ mod tests {
         let backend = create_backend().await;
         let basin: BasinName = format!("test-basin-{test_suffix}").parse().unwrap();
         backend
-            .create_basin(
+            .provision_basin(
                 basin.clone(),
-                CreateBasinIntent::CreateOnly {
-                    config: basin_config,
+                basin_config,
+                ProvisionMode::CreateOnly {
                     request_token: None,
                 },
             )
