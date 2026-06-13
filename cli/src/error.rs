@@ -1,4 +1,5 @@
 use miette::Diagnostic;
+use s2_api::v1::error::ErrorCode;
 use s2_sdk::types::S2Error;
 use thiserror::Error;
 
@@ -181,13 +182,15 @@ impl std::fmt::Display for TokenSource {
 
 fn is_auth_error(err: &S2Error) -> bool {
     match err {
-        S2Error::Server(response) => {
-            matches!(
-                response.code.as_str(),
-                "authn" | "permission_denied" | "access_token_not_found"
-            )
-        }
+        S2Error::Server(response) => is_auth_error_code(&response.code),
         _ => false,
+    }
+}
+
+fn is_auth_error_code(code: &str) -> bool {
+    match code.parse::<ErrorCode>() {
+        Ok(code) => code.is_auth_error(),
+        Err(_) => false,
     }
 }
 
