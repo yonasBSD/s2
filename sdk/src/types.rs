@@ -1562,8 +1562,8 @@ impl From<api::location::LocationInfo> for LocationInfo {
 pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
-    /// Expiration time.
-    pub expires_at: S2DateTime,
+    /// Expiration time, or `None` if the token does not expire.
+    pub expires_at: Option<S2DateTime>,
     /// Whether to automatically prefix stream names during creation and strip the prefix during
     /// listing.
     pub auto_prefix_streams: bool,
@@ -1575,15 +1575,11 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
     type Error = ValidationError;
 
     fn try_from(value: api::access::AccessTokenInfo) -> Result<Self, Self::Error> {
-        let expires_at = value
-            .expires_at
-            .map(S2DateTime::try_from)
-            .transpose()?
-            .ok_or_else(|| ValidationError::from("missing expires_at"))?;
+        let expires_at = value.expires_at.map(S2DateTime::try_from).transpose()?;
         Ok(Self {
             id: value.id,
             expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.unwrap_or(false),
+            auto_prefix_streams: value.auto_prefix_streams,
             scope: value.scope.into(),
         })
     }
@@ -2140,7 +2136,7 @@ impl IssueAccessTokenInput {
     }
 }
 
-impl From<IssueAccessTokenInput> for api::access::AccessTokenInfo {
+impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
     fn from(value: IssueAccessTokenInput) -> Self {
         Self {
             id: value.id,
