@@ -180,15 +180,6 @@ impl From<TimestampingConfig> for OptionalTimestampingConfig {
     }
 }
 
-impl From<OptionalTimestampingConfig> for TimestampingReconfiguration {
-    fn from(value: OptionalTimestampingConfig) -> Self {
-        Self {
-            mode: value.mode.into(),
-            uncapped: value.uncapped.into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalDeleteOnEmptyConfig {
     pub min_age: Option<Duration>,
@@ -220,14 +211,6 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         Self {
             min_age: Some(value.min_age),
-        }
-    }
-}
-
-impl From<OptionalDeleteOnEmptyConfig> for DeleteOnEmptyReconfiguration {
-    fn from(value: OptionalDeleteOnEmptyConfig) -> Self {
-        Self {
-            min_age: value.min_age.into(),
         }
     }
 }
@@ -294,24 +277,6 @@ impl OptionalStreamConfig {
             retention_policy,
             timestamping,
             delete_on_empty,
-        }
-    }
-}
-
-impl From<OptionalStreamConfig> for StreamReconfiguration {
-    fn from(value: OptionalStreamConfig) -> Self {
-        let OptionalStreamConfig {
-            storage_class,
-            retention_policy,
-            timestamping,
-            delete_on_empty,
-        } = value;
-
-        Self {
-            storage_class: storage_class.into(),
-            retention_policy: retention_policy.into(),
-            timestamping: Some(timestamping.into()).into(),
-            delete_on_empty: Some(delete_on_empty.into()).into(),
         }
     }
 }
@@ -392,24 +357,6 @@ impl BasinConfig {
         }
 
         self
-    }
-}
-
-impl From<BasinConfig> for BasinReconfiguration {
-    fn from(value: BasinConfig) -> Self {
-        let BasinConfig {
-            default_stream_config,
-            stream_cipher,
-            create_stream_on_append,
-            create_stream_on_read,
-        } = value;
-
-        Self {
-            default_stream_config: Some(default_stream_config.into()).into(),
-            stream_cipher: stream_cipher.into(),
-            create_stream_on_append: create_stream_on_append.into(),
-            create_stream_on_read: create_stream_on_read.into(),
-        }
     }
 }
 
