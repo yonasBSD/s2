@@ -11,6 +11,7 @@ use base64ct::Encoding;
 use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, prelude::Backend};
+use s2_common::maybe::Maybe;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenInfo, BasinInfo, BasinMetricSet, BasinName, StreamInfo,
     StreamMetricSet, StreamName, StreamPosition, TimeRange,
@@ -28,7 +29,7 @@ use super::{
 use crate::{
     cli::{
         CreateStreamArgs, IssueAccessTokenArgs, ListAccessTokensArgs, ListBasinsArgs,
-        ListStreamsArgs, ReadArgs, ReconfigureBasinArgs, ReconfigureStreamArgs,
+        ListStreamsArgs, ReadArgs,
     },
     config::{self, Compression, ConfigKey},
     error::CliError,
@@ -36,8 +37,7 @@ use crate::{
     record_format::{RecordFormat, RecordsOut},
     types::{
         BasinConfig, DeleteOnEmptyConfig, Operation, RetentionPolicy, S2BasinAndMaybeStreamUri,
-        S2BasinAndStreamUri, S2BasinUri, StorageClass, StreamConfig, TimestampingConfig,
-        TimestampingMode,
+        S2BasinAndStreamUri, StorageClass, StreamConfig, TimestampingConfig, TimestampingMode,
     },
 };
 
@@ -679,6 +679,9 @@ pub enum InputMode {
         editing_age: bool,
         age_input: String,
         cursor: usize,
+        /// Whether the current config has loaded; submit is blocked until then so
+        /// an unpopulated form can't clobber existing values.
+        loaded: bool,
     },
     /// Reconfiguring a stream
     ReconfigureStream {
@@ -695,6 +698,9 @@ pub enum InputMode {
         editing_age: bool,
         age_input: String,
         cursor: usize,
+        /// Whether the current config has loaded; submit is blocked until then so
+        /// an unpopulated form can't clobber existing values.
+        loaded: bool,
     },
     /// Custom read configuration
     CustomRead {
@@ -818,6 +824,24 @@ fn timestamping_mode_prev(tm: &Option<TimestampingMode>) -> Option<TimestampingM
         Some(TimestampingMode::ClientPrefer) => None,
         Some(TimestampingMode::ClientRequire) => Some(TimestampingMode::ClientPrefer),
         Some(TimestampingMode::Arrival) => Some(TimestampingMode::ClientRequire),
+    }
+}
+
+/// Cycle uncapped forward: inherit (None) -> on -> off -> inherit.
+fn uncapped_next(uncapped: Option<bool>) -> Option<bool> {
+    match uncapped {
+        None => Some(true),
+        Some(true) => Some(false),
+        Some(false) => None,
+    }
+}
+
+/// Cycle uncapped backward: inherit (None) -> off -> on -> inherit.
+fn uncapped_prev(uncapped: Option<bool>) -> Option<bool> {
+    match uncapped {
+        None => Some(false),
+        Some(false) => Some(true),
+        Some(true) => None,
     }
 }
 
@@ -1144,6 +1168,33 @@ fn build_stream_config(
         timestamping,
         delete_on_empty,
     }
+}
+
+fn build_stream_reconfiguration(
+    storage_class: Option<StorageClass>,
+    retention_policy: Option<RetentionPolicy>,
+    timestamping_mode: Option<TimestampingMode>,
+    timestamping_uncapped: Option<bool>,
+    delete_on_empty: Option<DeleteOnEmptyConfig>,
+) -> s2_sdk::types::StreamReconfiguration {
+    let mut timestamping = s2_sdk::types::TimestampingReconfiguration::new();
+    if let Some(mode) = timestamping_mode {
+        timestamping = timestamping.with_mode(mode.into());
+    }
+    // Always Specified: `None` clears uncapped to inherit the basin default.
+    timestamping.uncapped = Maybe::Specified(timestamping_uncapped);
+
+    let mut reconfig = s2_sdk::types::StreamReconfiguration::new().with_timestamping(timestamping);
+    if let Some(storage_class) = storage_class {
+        reconfig = reconfig.with_storage_class(storage_class.into());
+    }
+    if let Some(retention_policy) = retention_policy {
+        reconfig = reconfig.with_retention_policy(retention_policy.into());
+    }
+    if let Some(delete_on_empty) = delete_on_empty {
+        reconfig = reconfig.with_delete_on_empty(delete_on_empty.into());
+    }
+    reconfig
 }
 
 impl App {
@@ -1724,6 +1775,7 @@ impl App {
                     timestamping_mode,
                     timestamping_uncapped,
                     age_input,
+                    loaded,
                     ..
                 } = &mut self.input_mode
                 {
@@ -1741,6 +1793,7 @@ impl App {
                             }
                             *timestamping_mode = info.timestamping_mode;
                             *timestamping_uncapped = info.timestamping_uncapped;
+                            *loaded = true;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -1763,6 +1816,7 @@ impl App {
                     delete_on_empty_enabled,
                     delete_on_empty_min_age,
                     age_input,
+                    loaded,
                     ..
                 } = &mut self.input_mode
                 {
@@ -1785,6 +1839,7 @@ impl App {
                             } else {
                                 *delete_on_empty_enabled = false;
                             }
+                            *loaded = true;
                         }
                         Err(e) => {
                             self.input_mode = InputMode::Normal;
@@ -2725,6 +2780,7 @@ impl App {
                 editing_age,
                 age_input,
                 cursor,
+                loaded,
             } => {
                 const BASIN_MAX_ROW: usize = 6;
                 if *editing_age {
@@ -2768,7 +2824,7 @@ impl App {
                         }
                     }
                     KeyCode::Char(' ') => match *selected {
-                        4 => *timestamping_uncapped = Some(!timestamping_uncapped.unwrap_or(false)),
+                        4 => *timestamping_uncapped = uncapped_next(*timestamping_uncapped),
                         5 => {
                             *create_stream_on_append =
                                 Some(!create_stream_on_append.unwrap_or(false))
@@ -2787,15 +2843,17 @@ impl App {
                         0 => *storage_class = storage_class_prev(storage_class),
                         1 => *retention_policy = retention_policy.toggle(),
                         3 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
+                        4 => *timestamping_uncapped = uncapped_prev(*timestamping_uncapped),
                         _ => {}
                     },
                     KeyCode::Right | KeyCode::Char('l') => match *selected {
                         0 => *storage_class = storage_class_next(storage_class),
                         1 => *retention_policy = retention_policy.toggle(),
                         3 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
+                        4 => *timestamping_uncapped = uncapped_next(*timestamping_uncapped),
                         _ => {}
                     },
-                    KeyCode::Char('s') => {
+                    KeyCode::Char('s') if *loaded => {
                         let b = basin.clone();
                         let config = BasinReconfigureConfig {
                             stream_cipher: None,
@@ -2827,6 +2885,7 @@ impl App {
                 editing_age,
                 age_input,
                 cursor,
+                loaded,
             } => {
                 if *editing_age {
                     let (field, digits_only): (&mut String, bool) = if *selected == 2 {
@@ -2889,7 +2948,7 @@ impl App {
                         }
                     }
                     KeyCode::Char(' ') if *selected == 4 => {
-                        *timestamping_uncapped = Some(!timestamping_uncapped.unwrap_or(false));
+                        *timestamping_uncapped = uncapped_next(*timestamping_uncapped);
                     }
                     KeyCode::Enter => {
                         if *selected == 2 && *retention_policy == RetentionPolicyOption::Age {
@@ -2905,6 +2964,7 @@ impl App {
                         0 => *storage_class = storage_class_prev(storage_class),
                         1 => *retention_policy = retention_policy.toggle(),
                         3 => *timestamping_mode = timestamping_mode_prev(timestamping_mode),
+                        4 => *timestamping_uncapped = uncapped_prev(*timestamping_uncapped),
                         5 => *delete_on_empty_enabled = !*delete_on_empty_enabled,
                         _ => {}
                     },
@@ -2912,10 +2972,11 @@ impl App {
                         0 => *storage_class = storage_class_next(storage_class),
                         1 => *retention_policy = retention_policy.toggle(),
                         3 => *timestamping_mode = timestamping_mode_next(timestamping_mode),
+                        4 => *timestamping_uncapped = uncapped_next(*timestamping_uncapped),
                         5 => *delete_on_empty_enabled = !*delete_on_empty_enabled,
                         _ => {}
                     },
-                    KeyCode::Char('s') => {
+                    KeyCode::Char('s') if *loaded => {
                         let b = basin.clone();
                         let s = stream.clone();
                         let config = StreamReconfigureConfig {
@@ -3691,6 +3752,7 @@ impl App {
                         editing_age: false,
                         age_input: String::new(),
                         cursor: 0,
+                        loaded: false,
                     };
                     // Load current config
                     self.load_basin_config(basin_name, tx);
@@ -3925,6 +3987,7 @@ impl App {
                         editing_age: false,
                         age_input: String::new(),
                         cursor: 0,
+                        loaded: false,
                     };
                     // Load current config
                     self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
@@ -4013,6 +4076,7 @@ impl App {
                     editing_age: false,
                     age_input: String::new(),
                     cursor: 0,
+                    loaded: false,
                 };
                 self.load_stream_config_for_reconfig(basin_name, stream_name, tx);
             }
@@ -4970,31 +5034,27 @@ impl App {
                 )),
             };
 
-            let timestamping =
-                if config.timestamping_mode.is_some() || config.timestamping_uncapped.is_some() {
-                    Some(crate::types::TimestampingConfig {
-                        timestamping_mode: config.timestamping_mode,
-                        timestamping_uncapped: config.timestamping_uncapped,
-                    })
-                } else {
-                    None
-                };
-
-            let default_stream_config = StreamConfig {
-                storage_class: config.storage_class,
+            let default_stream_config = build_stream_reconfiguration(
+                config.storage_class,
                 retention_policy,
-                timestamping,
-                delete_on_empty: None,
-            };
+                config.timestamping_mode,
+                config.timestamping_uncapped,
+                None,
+            );
 
-            let args = ReconfigureBasinArgs {
-                basin: S2BasinUri(basin),
-                stream_cipher: config.stream_cipher,
-                create_stream_on_append: config.create_stream_on_append,
-                create_stream_on_read: config.create_stream_on_read,
-                default_stream_config,
-            };
-            match ops::reconfigure_basin(&s2, args).await {
+            let mut reconfig = s2_sdk::types::BasinReconfiguration::new()
+                .with_default_stream_config(default_stream_config);
+            if let Some(algorithm) = config.stream_cipher {
+                reconfig = reconfig.with_stream_cipher(algorithm);
+            }
+            if let Some(val) = config.create_stream_on_append {
+                reconfig = reconfig.with_create_stream_on_append(val);
+            }
+            if let Some(val) = config.create_stream_on_read {
+                reconfig = reconfig.with_create_stream_on_read(val);
+            }
+
+            match ops::reconfigure_basin_with(&s2, basin, reconfig).await {
                 Ok(_) => {
                     let _ = tx.send(Event::BasinReconfigured(Ok(())));
                     // Trigger refresh
@@ -5033,16 +5093,6 @@ impl App {
                 )),
             };
 
-            let timestamping =
-                if config.timestamping_mode.is_some() || config.timestamping_uncapped.is_some() {
-                    Some(crate::types::TimestampingConfig {
-                        timestamping_mode: config.timestamping_mode,
-                        timestamping_uncapped: config.timestamping_uncapped,
-                    })
-                } else {
-                    None
-                };
-
             let delete_on_empty = if config.delete_on_empty_enabled {
                 humantime::parse_duration(&config.delete_on_empty_min_age)
                     .ok()
@@ -5053,16 +5103,16 @@ impl App {
                 None
             };
 
-            let args = ReconfigureStreamArgs {
-                uri: S2BasinAndStreamUri { basin, stream },
-                config: StreamConfig {
-                    storage_class: config.storage_class,
-                    retention_policy,
-                    timestamping,
-                    delete_on_empty,
-                },
-            };
-            match ops::reconfigure_stream(&s2, args).await {
+            let reconfig = build_stream_reconfiguration(
+                config.storage_class,
+                retention_policy,
+                config.timestamping_mode,
+                config.timestamping_uncapped,
+                delete_on_empty,
+            );
+
+            let uri = S2BasinAndStreamUri { basin, stream };
+            match ops::reconfigure_stream_with(&s2, uri, reconfig).await {
                 Ok(_) => {
                     let _ = tx.send(Event::StreamReconfigured(Ok(())));
                     // Trigger refresh
@@ -7702,5 +7752,122 @@ mod tests {
             panic!()
         };
         assert_eq!(*cursor, 4);
+    }
+
+    #[test]
+    fn uncapped_cycle_reaches_inherit() {
+        assert_eq!(uncapped_next(None), Some(true));
+        assert_eq!(uncapped_next(Some(true)), Some(false));
+        assert_eq!(uncapped_next(Some(false)), None);
+        assert_eq!(uncapped_prev(None), Some(false));
+        assert_eq!(uncapped_prev(Some(false)), Some(true));
+        assert_eq!(uncapped_prev(Some(true)), None);
+    }
+
+    fn timestamping_of(
+        reconfig: s2_sdk::types::StreamReconfiguration,
+    ) -> s2_sdk::types::TimestampingReconfiguration {
+        match reconfig.timestamping {
+            Maybe::Specified(Some(ts)) => ts,
+            other => panic!("expected a specified timestamping reconfiguration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconfiguration_clears_uncapped_to_inherit() {
+        // None -> Specified(None), i.e. clear to inherit, not "no change".
+        let ts = timestamping_of(build_stream_reconfiguration(None, None, None, None, None));
+        assert!(matches!(ts.uncapped, Maybe::Specified(None)));
+
+        let ts = timestamping_of(build_stream_reconfiguration(
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+        ));
+        assert!(matches!(ts.uncapped, Maybe::Specified(Some(true))));
+
+        let ts = timestamping_of(build_stream_reconfiguration(
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+        ));
+        assert!(matches!(ts.uncapped, Maybe::Specified(Some(false))));
+    }
+
+    #[test]
+    fn reconfigure_stream_uncapped_can_clear_to_inherit() {
+        let mut app = App::new(None);
+        app.input_mode = InputMode::ReconfigureStream {
+            basin: "test-basin".parse().unwrap(),
+            stream: "test-stream".parse().unwrap(),
+            storage_class: None,
+            retention_policy: RetentionPolicyOption::Infinite,
+            retention_age_secs: 0,
+            timestamping_mode: None,
+            timestamping_uncapped: Some(true),
+            delete_on_empty_enabled: false,
+            delete_on_empty_min_age: String::new(),
+            selected: 4,
+            editing_age: false,
+            age_input: String::new(),
+            cursor: 0,
+            loaded: true,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let uncapped = |app: &App| {
+            let InputMode::ReconfigureStream {
+                timestamping_uncapped,
+                ..
+            } = &app.input_mode
+            else {
+                panic!()
+            };
+            *timestamping_uncapped
+        };
+
+        app.handle_input_key(key(KeyCode::Char(' ')), tx.clone());
+        assert_eq!(uncapped(&app), Some(false));
+        app.handle_input_key(key(KeyCode::Char(' ')), tx.clone());
+        assert_eq!(uncapped(&app), None);
+        app.handle_input_key(key(KeyCode::Char(' ')), tx.clone());
+        assert_eq!(uncapped(&app), Some(true));
+
+        app.handle_input_key(key(KeyCode::Left), tx.clone());
+        assert_eq!(uncapped(&app), None);
+    }
+
+    #[test]
+    fn reconfigure_stream_submit_blocked_until_loaded() {
+        // No S2 client: submitting an unloaded form would panic if not gated,
+        // and would otherwise clobber the stream's config with form defaults.
+        let mut app = App::new(None);
+        app.input_mode = InputMode::ReconfigureStream {
+            basin: "test-basin".parse().unwrap(),
+            stream: "test-stream".parse().unwrap(),
+            storage_class: None,
+            retention_policy: RetentionPolicyOption::Infinite,
+            retention_age_secs: 0,
+            timestamping_mode: None,
+            timestamping_uncapped: None,
+            delete_on_empty_enabled: false,
+            delete_on_empty_min_age: String::new(),
+            selected: 0,
+            editing_age: false,
+            age_input: String::new(),
+            cursor: 0,
+            loaded: false,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_input_key(key(KeyCode::Char('s')), tx.clone());
+        assert!(matches!(
+            app.input_mode,
+            InputMode::ReconfigureStream { .. }
+        ));
     }
 }
